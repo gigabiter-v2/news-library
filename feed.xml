@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom"
+      xmlns:opds="http://opds-spec.org/2010/catalog">
+  <id>urn:uuid:x4-news-library-root</id>
+  <title>News & Biography Library</title>
+  <updated>2026-08-18T00:07:50.234606+09:00</updated>
+  <link rel="self" href="feed.xml" type="application/atom+xml;profile=opds-catalog;kind=acquisition"/>
+  <entry>
+    <title>ニュースダイジェスト 2026-08-18</title>
+    <id>urn:uuid:2026-08-18_digest</id>
+    <updated>2026-08-18T00:00:00+09:00</updated>
+    <link rel="http://opds-spec.org/acquisition"
+          href="books/2026-08-18_digest.epub"
+          type="application/epub+zip"/>
+  </entry>
+</feed>
