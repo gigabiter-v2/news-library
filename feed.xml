@@ -3,7 +3,7 @@
       xmlns:opds="http://opds-spec.org/2010/catalog">
   <id>urn:uuid:x4-news-library-root</id>
   <title>News & Biography Library</title>
-  <updated>2026-08-18T06:55:02.316249+09:00</updated>
+  <updated>2026-08-19T06:51:00.153123+09:00</updated>
   <link rel="self" href="feed.xml" type="application/atom+xml;profile=opds-catalog;kind=acquisition"/>
   <entry>
     <title>ニュースダイジェスト 2026-08-18</title>
@@ -11,6 +11,14 @@
     <updated>2026-08-18T00:00:00+09:00</updated>
     <link rel="http://opds-spec.org/acquisition"
           href="books/2026-08-18_digest.epub"
+          type="application/epub+zip"/>
+  </entry>
+  <entry>
+    <title>ニュースダイジェスト 2026-08-19</title>
+    <id>urn:uuid:2026-08-19_digest</id>
+    <updated>2026-08-19T00:00:00+09:00</updated>
+    <link rel="http://opds-spec.org/acquisition"
+          href="books/2026-08-19_digest.epub"
           type="application/epub+zip"/>
   </entry>
 </feed>
