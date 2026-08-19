@@ -21,6 +21,7 @@ import feedparser
 import requests
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from xml.sax.saxutils import escape
 from ebooklib import epub
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -157,28 +158,38 @@ def build_epub(date_str, weather, articles_by_category, output_path):
     # 気象セクション
     if weather:
         weather_html = f"""
-        <h1>気象 ({weather['area']})</h1>
-        <p>{weather['text']}</p>
-        <p style="font-size:0.8em;color:#666;">発表: {weather['report_datetime']}</p>
+        <h1>気象 ({escape(weather['area'])})</h1>
+        <p>{escape(weather['text'])}</p>
+        <p style="font-size:0.8em;color:#666;">発表: {escape(weather['report_datetime'])}</p>
         """
         c = epub.EpubHtml(title="気象", file_name="weather.xhtml", lang="ja")
         c.content = weather_html
         book.add_item(c)
         chapters.append(c)
 
-    category_labels = {"economy": "経済", "general": "主要ニュース"}
+    category_labels = {
+        "economy": "経済",
+        "general": "主要ニュース",
+        "tech": "技術・IT",
+        "international": "国際",
+        "society": "社会",
+        "crypto": "仮想通貨",
+        "car": "車",
+        "medical": "医療業界",
+        "finance_literacy": "金融リテラシー",
+    }
 
     for category, articles in articles_by_category.items():
         label = category_labels.get(category, category)
         items_html = ""
         for art in articles:
             items_html += f"""
-            <h2>{art['title']}</h2>
-            <p>{art['summary']}</p>
-            <p style="font-size:0.8em;"><a href="{art['link']}">元記事: {art['source']}</a></p>
+            <h2>{escape(art['title'])}</h2>
+            <p>{escape(art['summary'])}</p>
+            <p style="font-size:0.8em;"><a href="{escape(art['link'])}">元記事: {escape(art['source'])}</a></p>
             <hr/>
             """
-        cat_html = f"<h1>{label}</h1>{items_html}"
+        cat_html = f"<h1>{escape(label)}</h1>{items_html}"
         c = epub.EpubHtml(title=label, file_name=f"{category}.xhtml", lang="ja")
         c.content = cat_html
         book.add_item(c)
@@ -223,11 +234,11 @@ def update_opds_feed(cfg, entries):
     for e in kept_entries:
         entries_xml += f"""
   <entry>
-    <title>{e['title']}</title>
-    <id>urn:uuid:{e['id']}</id>
-    <updated>{e['updated']}</updated>
+    <title>{escape(e['title'])}</title>
+    <id>urn:uuid:{escape(e['id'])}</id>
+    <updated>{escape(e['updated'])}</updated>
     <link rel="http://opds-spec.org/acquisition"
-          href="books/{e['filename']}"
+          href="{escape('books/' + e['filename'])}"
           type="application/epub+zip"/>
   </entry>"""
 
@@ -235,8 +246,8 @@ def update_opds_feed(cfg, entries):
 <feed xmlns="http://www.w3.org/2005/Atom"
       xmlns:opds="http://opds-spec.org/2010/catalog">
   <id>urn:uuid:x4-news-library-root</id>
-  <title>News & Biography Library</title>
-  <updated>{now_iso}</updated>
+  <title>{escape("News & Biography Library")}</title>
+  <updated>{escape(now_iso)}</updated>
   <link rel="self" href="feed.xml" type="application/atom+xml;profile=opds-catalog;kind=acquisition"/>{entries_xml}
 </feed>
 """
