@@ -2,8 +2,8 @@
 <feed xmlns="http://www.w3.org/2005/Atom"
       xmlns:opds="http://opds-spec.org/2010/catalog">
   <id>urn:uuid:x4-news-library-root</id>
-  <title>News & Biography Library</title>
-  <updated>2026-08-19T06:51:00.153123+09:00</updated>
+  <title>News &amp; Biography Library</title>
+  <updated>2026-08-19T21:50:59.670408+09:00</updated>
   <link rel="self" href="feed.xml" type="application/atom+xml;profile=opds-catalog;kind=acquisition"/>
   <entry>
     <title>ニュースダイジェスト 2026-08-18</title>
