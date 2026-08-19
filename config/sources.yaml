@@ -1,0 +1,92 @@
+# ニュース取得元設定
+# ここを編集するだけで取得対象を追加・変更できる
+
+# 気象庁 天気予報概況(公式JSON、非公式API扱いなので仕様変更リスクあり)
+# 地域コード一覧: https://www.jma.go.jp/bosai/common/const/area.json
+weather:
+  enabled: true
+  area_code: "130000"   # 例: 東京 130000。必要に応じて変更してください
+  area_name: "東京"
+  url_template: "https://www.jma.go.jp/bosai/forecast/data/overview_forecast/{code}.json"
+
+# 各カテゴリのRSS取得元
+# ※印のあるものは今回未検証。動かない場合はURLを見直してください
+rss_feeds:
+  - name: "NHKニュース 経済"
+    url: "https://www.nhk.or.jp/rss/news/cat5.xml"
+    category: "economy"
+    enabled: true
+
+  - name: "NHKニュース 主要"
+    url: "https://www.nhk.or.jp/rss/news/cat0.xml"
+    category: "general"
+    enabled: true
+
+  - name: "NHKニュース 科学・医療"
+    url: "https://www.nhk.or.jp/rss/news/cat3.xml"
+    category: "tech"
+    enabled: true
+
+  - name: "ITmedia NEWS"
+    url: "https://rss.itmedia.co.jp/rss/2.0/news_bursts.xml"
+    category: "tech"
+    enabled: true
+
+  - name: "NHKニュース 国際"
+    url: "https://www.nhk.or.jp/rss/news/cat6.xml"
+    category: "international"
+    enabled: true
+
+  - name: "NHKニュース 社会"
+    url: "https://www.nhk.or.jp/rss/news/cat1.xml"
+    category: "society"
+    enabled: true
+
+  - name: "CoinPost"
+    url: "https://coinpost.jp/?feed=rss2"
+    category: "crypto"
+    enabled: true
+
+  - name: "Response(自動車)"
+    url: "http://response.jp/rss/index.rdf"
+    category: "car"
+    enabled: true
+
+  # 未検証: 確実なRSS URLが見つからなかったため仮設定。動かない場合は要調査
+  - name: "日経メディカル(仮)"
+    url: "https://medical.nikkeibp.co.jp/rss/all.rdf"
+    category: "medical"
+    enabled: true
+
+  # 未検証: 確実なRSS URLが見つからなかったため仮設定。動かない場合は要調査
+  - name: "金融庁 報道発表(仮)"
+    url: "https://www.fsa.go.jp/rss/news.rdf"
+    category: "finance_literacy"
+    enabled: true
+
+# キーワードフィルタ(このいずれかを含む記事タイトルのみ採用。空なら全件対象)
+keyword_filter:
+  economy:
+    - "日銀"
+    - "株価"
+    - "為替"
+    - "物価"
+    - "金利"
+    - "決算"
+  general:
+    - "台風"
+    - "地震"
+    - "選挙"
+  tech: []
+  international: []
+  society: []
+  crypto: []
+  car: []
+  medical: []
+  finance_literacy: []
+
+# 1トピック要約の目安文字数(通勤30分以上の読書時間を想定)
+summary_length: 350
+
+# 1回の実行で採用する最大記事数(カテゴリごと)
+max_articles_per_category: 15
