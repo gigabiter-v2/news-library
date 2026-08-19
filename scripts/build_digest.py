@@ -35,6 +35,9 @@ GEMINI_ENDPOINT = f"https://generativelanguage.googleapis.com/v1beta/models/{GEM
 
 JST = timezone(timedelta(hours=9))
 
+# GitHub PagesのベースURL(相対パスの解決に依存しないよう、リンクは絶対URLで出力する)
+SITE_BASE_URL = os.environ.get("SITE_BASE_URL", "https://gigabiter-v2.github.io/news-library")
+
 
 def load_config():
     with open(CONFIG_PATH, encoding="utf-8") as f:
@@ -238,7 +241,7 @@ def update_opds_feed(cfg, entries):
     <id>urn:uuid:{escape(e['id'])}</id>
     <updated>{escape(e['updated'])}</updated>
     <link rel="http://opds-spec.org/acquisition"
-          href="{escape('books/' + e['filename'])}"
+          href="{escape(SITE_BASE_URL + '/books/' + e['filename'])}"
           type="application/epub+zip"/>
   </entry>"""
 
@@ -248,7 +251,7 @@ def update_opds_feed(cfg, entries):
   <id>urn:uuid:x4-news-library-root</id>
   <title>{escape("News & Biography Library")}</title>
   <updated>{escape(now_iso)}</updated>
-  <link rel="self" href="feed.xml" type="application/atom+xml;profile=opds-catalog;kind=acquisition"/>{entries_xml}
+  <link rel="self" href="{escape(SITE_BASE_URL + '/feed.xml')}" type="application/atom+xml;profile=opds-catalog;kind=acquisition"/>{entries_xml}
 </feed>
 """
     FEED_PATH.write_text(feed_xml, encoding="utf-8")
