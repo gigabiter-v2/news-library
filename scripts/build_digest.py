@@ -210,6 +210,8 @@ def summarize_with_gemini(title, body_text, summary_hint, target_length):
         data = resp.json()
         return data["candidates"][0]["content"]["parts"][0]["text"].strip()
     except Exception as e:
+        # 429を含め、失敗時は待たずに即フォールバック(RSSのdescription)へ移る。
+        # 待って再試行しても改善しないことが多いため、確実な毎朝の配信を優先する。
         print(f"[WARN] Gemini要約失敗 ({title}): {e}", file=sys.stderr)
         return None
 
@@ -320,28 +322,57 @@ def main():
 
     summary_length = cfg.get("summary_length", 200)
 
+    # 全記事を1つのリストにまとめる(カテゴリをまたいで公平に扱うため)
+    all_articles = []
     for category, articles in articles_by_category.items():
         for art in articles:
-            body_text = fetch_article_text(art["link"])
-            summary = summarize_with_gemini(art["title"], body_text, art["summary_hint"], summary_length)
-            if not summary:
-                # AI要約に失敗した場合はRSSのdescriptionを使う。
-                # 350字に満たない場合はそのまま、超える場合は文の区切りで切る(単純な文字数カットで
-                # 語尾が不自然に切れるのを避ける)。
-                hint = (art["summary_hint"] or "").strip()
-                if not hint:
-                    summary = "(要約を取得できませんでした。元記事をご確認ください)"
-                elif len(hint) <= summary_length:
-                    summary = hint
-                else:
-                    cut = hint[:summary_length]
-                    # 句点があれば、その位置までで切って不自然な尻切れを避ける
-                    last_period = cut.rfind("。")
-                    summary = cut[:last_period + 1] if last_period > summary_length * 0.5 else cut
+            all_articles.append(art)
+
+    # --- フェーズ1: 全記事に対して一通りGemini要約を試みる(429でも待たず即座に次へ) ---
+    failed_articles = []
+    for art in all_articles:
+        body_text = fetch_article_text(art["link"])
+        summary = summarize_with_gemini(art["title"], body_text, art["summary_hint"], summary_length)
+        if summary:
             art["summary"] = summary
-            # この記事を配信済みとして記録(次回以降のfetch_rss_articlesで除外される)
-            sent_log[art["link"]] = datetime.now(JST).isoformat()
-            time.sleep(4.5)  # 無料枠のRPM制限(15RPM程度)に収めるため、1リクエストあたり十分な間隔を空ける
+        else:
+            art["_body_text"] = body_text  # 2周目で使い回すため保持
+            failed_articles.append(art)
+        time.sleep(1.5)
+
+    # --- フェーズ2: 1周目で失敗した記事だけ、少し間隔を空けてもう一度だけ挑戦する ---
+    if failed_articles:
+        print(f"[INFO] フェーズ1で{len(failed_articles)}件失敗。20秒待機してから再挑戦します", file=sys.stderr)
+        time.sleep(20)
+        still_failed = []
+        for art in failed_articles:
+            summary = summarize_with_gemini(art["title"], art.pop("_body_text", ""), art["summary_hint"], summary_length)
+            if summary:
+                art["summary"] = summary
+            else:
+                still_failed.append(art)
+            time.sleep(1.5)
+        failed_articles = still_failed
+
+    # --- それでも要約できなかった記事だけ、RSSのdescriptionで代用する ---
+    for art in failed_articles:
+        hint = (art["summary_hint"] or "").strip()
+        if not hint:
+            art["summary"] = "(要約を取得できませんでした。元記事をご確認ください)"
+        elif len(hint) <= summary_length:
+            art["summary"] = hint
+        else:
+            cut = hint[:summary_length]
+            # 句点があれば、その位置までで切って不自然な尻切れを避ける
+            last_period = cut.rfind("。")
+            art["summary"] = cut[:last_period + 1] if last_period > summary_length * 0.5 else cut
+
+    if failed_articles:
+        print(f"[WARN] 最終的に{len(failed_articles)}件はRSS要約で代用しました", file=sys.stderr)
+
+    # 配信済みとして記録(次回以降のfetch_rss_articlesで除外される)
+    for art in all_articles:
+        sent_log[art["link"]] = datetime.now(JST).isoformat()
 
     save_sent_log(sent_log)
     print(f"[INFO] 配信履歴を更新 (計{len(sent_log)}件を保持)")
