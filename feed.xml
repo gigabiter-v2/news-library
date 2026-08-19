@@ -3,22 +3,14 @@
       xmlns:opds="http://opds-spec.org/2010/catalog">
   <id>urn:uuid:x4-news-library-root</id>
   <title>News &amp; Biography Library</title>
-  <updated>2026-08-19T23:29:02.829400+09:00</updated>
+  <updated>2026-08-19T23:46:36.454658+09:00</updated>
   <link rel="self" href="https://gigabiter-v2.github.io/news-library/feed.xml" type="application/atom+xml;profile=opds-catalog;kind=acquisition"/>
   <entry>
-    <title>ニュースダイジェスト 2026-08-18</title>
-    <id>urn:uuid:2026-08-18_digest</id>
-    <updated>2026-08-18T00:00:00+09:00</updated>
-    <link rel="http://opds-spec.org/acquisition"
-          href="https://gigabiter-v2.github.io/news-library/books/2026-08-18_digest.epub"
-          type="application/epub+zip"/>
-  </entry>
-  <entry>
     <title>ニュースダイジェスト 2026-08-19</title>
-    <id>urn:uuid:2026-08-19_digest</id>
-    <updated>2026-08-19T00:00:00+09:00</updated>
+    <id>urn:uuid:latest-digest-2026-08-19</id>
+    <updated>2026-08-19T23:46:36.454647+09:00</updated>
     <link rel="http://opds-spec.org/acquisition"
-          href="https://gigabiter-v2.github.io/news-library/books/2026-08-19_digest.epub"
+          href="https://gigabiter-v2.github.io/news-library/books/latest_digest.epub"
           type="application/epub+zip"/>
   </entry>
 </feed>
