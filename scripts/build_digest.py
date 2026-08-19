@@ -102,19 +102,25 @@ def fetch_rss_articles(cfg):
     return articles_by_category
 
 
-def fetch_article_text(url, timeout=10):
+def fetch_article_text(url, timeout=15, retries=2):
     """要約生成のためだけに本文を一時取得する。保存はしない。"""
-    try:
-        resp = requests.get(url, timeout=timeout, headers={"User-Agent": "Mozilla/5.0"})
-        resp.raise_for_status()
-        # 簡易的なタグ除去(本格的な抽出はしない。要約精度が悪ければ改善余地あり)
-        import re
-        text = re.sub(r"<[^>]+>", " ", resp.text)
-        text = re.sub(r"\s+", " ", text)
-        return text[:4000]  # 要約入力として十分な長さに制限
-    except Exception as e:
-        print(f"[WARN] 本文取得失敗 {url}: {e}", file=sys.stderr)
-        return ""
+    import re
+    for attempt in range(retries + 1):
+        try:
+            resp = requests.get(url, timeout=timeout, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
+            resp.raise_for_status()
+            resp.encoding = resp.apparent_encoding  # 文字化け対策
+            # 簡易的なタグ除去(本格的な抽出はしない。要約精度が悪ければ改善余地あり)
+            text = re.sub(r"<script[^>]*>.*?</script>", " ", resp.text, flags=re.DOTALL)
+            text = re.sub(r"<style[^>]*>.*?</style>", " ", text, flags=re.DOTALL)
+            text = re.sub(r"<[^>]+>", " ", text)
+            text = re.sub(r"\s+", " ", text).strip()
+            if len(text) > 100:  # 極端に短い(取得失敗の可能性が高い)場合はリトライ
+                return text[:5000]  # 要約入力として十分な長さに制限
+        except Exception as e:
+            print(f"[WARN] 本文取得失敗(試行{attempt+1}/{retries+1}) {url}: {e}", file=sys.stderr)
+        time.sleep(1)
+    return ""
 
 
 def summarize_with_gemini(title, body_text, target_length):
@@ -187,9 +193,9 @@ def build_epub(date_str, weather, articles_by_category, output_path):
         items_html = ""
         for art in articles:
             items_html += f"""
-            <h2>{escape(art['title'])}</h2>
-            <p>{escape(art['summary'])}</p>
-            <p style="font-size:0.8em;"><a href="{escape(art['link'])}">元記事: {escape(art['source'])}</a></p>
+            <h2 style="margin-top:1.5em;margin-bottom:0.6em;">{escape(art['title'])}</h2>
+            <p style="margin-top:0;margin-bottom:0.8em;line-height:1.7;">{escape(art['summary'])}</p>
+            <p style="font-size:0.8em;margin-top:0;margin-bottom:1.2em;"><a href="{escape(art['link'])}">元記事: {escape(art['source'])}</a></p>
             <hr/>
             """
         cat_html = f"<h1>{escape(label)}</h1>{items_html}"
@@ -210,31 +216,12 @@ def build_epub(date_str, weather, articles_by_category, output_path):
 def update_opds_feed(cfg, entries):
     """
     entries: [{"id":..., "title":..., "filename":..., "updated":...}, ...]
-    直近N日分のみをfeed.xmlに残す(古いものは自然に切り捨て)。
+    固定ファイル名で毎回上書きする運用のため、feed.xmlには常に最新の1件のみが載る。
     """
-    retain_days = 7
-    cutoff = datetime.now(JST) - timedelta(days=retain_days)
-
-    # 既存EPUBファイルのうち、期限内のものだけ列挙(booksディレクトリを正とする)
-    kept_entries = []
-    for entry in entries:
-        kept_entries.append(entry)
-
-    # 古いEPUBファイルを削除(保持期間外)
-    for f in BOOKS_DIR.glob("*.epub"):
-        try:
-            date_part = f.stem.split("_")[0]  # 例: 2026-08-17_digest -> 2026-08-17
-            file_date = datetime.strptime(date_part, "%Y-%m-%d").replace(tzinfo=JST)
-            if file_date < cutoff:
-                f.unlink()
-                print(f"[INFO] 期限切れEPUB削除: {f.name}")
-        except Exception:
-            continue
-
     now_iso = datetime.now(JST).isoformat()
 
     entries_xml = ""
-    for e in kept_entries:
+    for e in entries:
         entries_xml += f"""
   <entry>
     <title>{escape(e['title'])}</title>
@@ -255,7 +242,7 @@ def update_opds_feed(cfg, entries):
 </feed>
 """
     FEED_PATH.write_text(feed_xml, encoding="utf-8")
-    print(f"[INFO] feed.xml 更新完了 ({len(kept_entries)}件)")
+    print(f"[INFO] feed.xml 更新完了 ({len(entries)}件)")
 
 
 def main():
@@ -272,29 +259,44 @@ def main():
             body_text = fetch_article_text(art["link"])
             summary = summarize_with_gemini(art["title"], body_text, summary_length)
             if not summary:
-                # AI要約に失敗した場合はRSSのdescriptionを軽くトリムして代用
-                summary = (art["summary_hint"] or "(要約取得失敗)")[:summary_length]
+                # AI要約に失敗した場合はRSSのdescriptionを使う。
+                # 350字に満たない場合はそのまま、超える場合は文の区切りで切る(単純な文字数カットで
+                # 語尾が不自然に切れるのを避ける)。
+                hint = (art["summary_hint"] or "").strip()
+                if not hint:
+                    summary = "(要約を取得できませんでした。元記事をご確認ください)"
+                elif len(hint) <= summary_length:
+                    summary = hint
+                else:
+                    cut = hint[:summary_length]
+                    # 句点があれば、その位置までで切って不自然な尻切れを避ける
+                    last_period = cut.rfind("。")
+                    summary = cut[:last_period + 1] if last_period > summary_length * 0.5 else cut
             art["summary"] = summary
             time.sleep(1)  # 無料枠のRPM対策として最低限の間隔を空ける
 
     BOOKS_DIR.mkdir(exist_ok=True)
-    filename = f"{date_str}_digest.epub"
+    # 固定ファイル名で毎回上書きする(ライブラリ内で本が増え続けて埋もれるのを防ぐため)。
+    # タイトルには日付を入れて、いつの分か分かるようにする。
+    filename = "latest_digest.epub"
     output_path = BOOKS_DIR / filename
+
+    # 前回分が残っていれば削除してから作り直す(上書きだが念のため明示的にクリーンアップ)
+    for old_f in BOOKS_DIR.glob("*.epub"):
+        if old_f.name != filename:
+            old_f.unlink()
+            print(f"[INFO] 旧ファイル削除: {old_f.name}")
+
     book_id = build_epub(date_str, weather, articles_by_category, output_path)
 
-    # 既存のfeed.xmlエントリを維持しつつ今回分を追加する設計に将来拡張可能。
-    # 現状はシンプルに「booksディレクトリ内の直近ファイル」を都度スキャンして再構築する。
-    all_entries = []
-    for f in sorted(BOOKS_DIR.glob("*.epub")):
-        d = f.stem.split("_")[0]
-        all_entries.append({
-            "id": f.stem,
-            "title": f"ニュースダイジェスト {d}",
-            "filename": f.name,
-            "updated": f"{d}T00:00:00+09:00",
-        })
+    entries = [{
+        "id": f"latest-digest-{date_str}",
+        "title": f"ニュースダイジェスト {date_str}",
+        "filename": filename,
+        "updated": datetime.now(JST).isoformat(),
+    }]
 
-    update_opds_feed(cfg, all_entries)
+    update_opds_feed(cfg, entries)
     print(f"[INFO] 完了: {filename}")
 
 
