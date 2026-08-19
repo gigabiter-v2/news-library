@@ -28,6 +28,7 @@ ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = ROOT / "config" / "sources.yaml"
 BOOKS_DIR = ROOT / "books"
 FEED_PATH = ROOT / "feed.xml"
+SENT_LOG_PATH = ROOT / "sent_articles.json"
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")  # モデル名は環境変数で差し替え可能にしておく
@@ -42,6 +43,37 @@ SITE_BASE_URL = os.environ.get("SITE_BASE_URL", "https://gigabiter-v2.github.io/
 def load_config():
     with open(CONFIG_PATH, encoding="utf-8") as f:
         return yaml.safe_load(f)
+
+
+def load_sent_log(retain_days=7):
+    """
+    過去に配信済みの記事URLを {url: 配信日時ISO文字列} の形で読み込む。
+    保持期間より古いものは読み込み時点で自動的に切り捨てる(ファイル肥大化防止)。
+    """
+    if not SENT_LOG_PATH.exists():
+        return {}
+    try:
+        with open(SENT_LOG_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        print(f"[WARN] 配信履歴の読み込み失敗(空として扱う): {e}", file=sys.stderr)
+        return {}
+
+    cutoff = datetime.now(JST) - timedelta(days=retain_days)
+    kept = {}
+    for url, sent_at in data.items():
+        try:
+            sent_dt = datetime.fromisoformat(sent_at)
+            if sent_dt >= cutoff:
+                kept[url] = sent_at
+        except Exception:
+            continue  # 壊れた日時が入っていた場合はそのエントリだけ捨てる
+    return kept
+
+
+def save_sent_log(sent_log):
+    with open(SENT_LOG_PATH, "w", encoding="utf-8") as f:
+        json.dump(sent_log, f, ensure_ascii=False, indent=2)
 
 
 def fetch_weather(cfg):
@@ -63,8 +95,10 @@ def fetch_weather(cfg):
         return None
 
 
-def fetch_rss_articles(cfg):
-    """RSSから記事一覧(タイトル・URL・descriptionのみ)を取得し、キーワードでフィルタ。"""
+def fetch_rss_articles(cfg, sent_log):
+    """RSSから記事一覧(タイトル・URL・descriptionのみ)を取得し、キーワードでフィルタ。
+    sent_logに含まれるURL(過去配信済み)は除外する。
+    """
     articles_by_category = {}
     keyword_filter = cfg.get("keyword_filter", {})
     max_per_cat = cfg.get("max_articles_per_category", 8)
@@ -87,6 +121,9 @@ def fetch_rss_articles(cfg):
             link = entry.get("link", "")
             summary_hint = entry.get("summary", "")
 
+            if not link or link in sent_log:
+                continue  # 過去に配信済みの記事は除外
+
             if keywords and not any(kw in title for kw in keywords):
                 continue
 
@@ -102,9 +139,14 @@ def fetch_rss_articles(cfg):
     return articles_by_category
 
 
-def fetch_article_text(url, timeout=15, retries=2):
-    """要約生成のためだけに本文を一時取得する。保存はしない。"""
+def fetch_article_text(url, timeout=15, retries=1):
+    """要約生成のためだけに本文を一時取得する。保存はしない。
+    NHKニュースサイト(news.web.nhk)は自動アクセスを403で一律ブロックしているため、
+    無駄なリトライを避けて即座に諦める。
+    """
     import re
+    if "news.web.nhk" in url:
+        return ""
     for attempt in range(retries + 1):
         try:
             resp = requests.get(url, timeout=timeout, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
@@ -119,21 +161,39 @@ def fetch_article_text(url, timeout=15, retries=2):
                 return text[:5000]  # 要約入力として十分な長さに制限
         except Exception as e:
             print(f"[WARN] 本文取得失敗(試行{attempt+1}/{retries+1}) {url}: {e}", file=sys.stderr)
-        time.sleep(1)
+        if attempt < retries:
+            time.sleep(1)
     return ""
 
 
-def summarize_with_gemini(title, body_text, target_length):
-    """Gemini APIで要約を生成する。失敗時はNoneを返す(呼び出し側でRSS summaryにフォールバック)。"""
-    if not GEMINI_API_KEY or not body_text:
+def summarize_with_gemini(title, body_text, summary_hint, target_length):
+    """Gemini APIで要約を生成する。失敗時はNoneを返す(呼び出し側でRSS summaryにフォールバック)。
+    本文が取得できなかった場合(NHKなど)は、タイトルとRSSの短い要約(summary_hint)を
+    手がかりに、Geminiに内容を補って自然な文章にまとめてもらう。
+    """
+    if not GEMINI_API_KEY:
+        return None
+    if not body_text and not summary_hint:
         return None
 
+    if body_text:
+        source_text = f"本文: {body_text}"
+        instruction = "元の文章表現をそのまま使わず、あなた自身の言葉で"
+    else:
+        # 本文が取得できない場合、RSSの短い抜粋(尻切れのことが多い)を素材に、
+        # 一般的なニュース記事としてあり得る自然な文章に補って再構成してもらう。
+        source_text = f"この記事の抜粋(尻切れの可能性あり): {summary_hint}"
+        instruction = (
+            "抜粋が文の途中で切れている場合は、無理に続きを創作せず、"
+            "分かっている範囲の事実だけを使って自然な文章に整えて"
+        )
+
     prompt = (
-        f"以下はニュース記事の本文(一部)です。この記事の内容を、"
-        f"元の文章表現をそのまま使わず、あなた自身の言葉で{target_length}字程度に要約してください。"
-        f"事実関係(数字・固有名詞・時系列)は正確に保ってください。"
+        f"以下はニュース記事の情報です。この記事の内容を、"
+        f"{instruction}{target_length}字程度に要約してください。"
+        f"事実関係(数字・固有名詞・時系列)は正確に保ち、憶測で新しい事実を付け加えないでください。"
         f"見出しやラベルは不要で、要約本文のみを出力してください。\n\n"
-        f"タイトル: {title}\n\n本文: {body_text}"
+        f"タイトル: {title}\n\n{source_text}"
     )
 
     payload = {
@@ -249,15 +309,21 @@ def main():
     cfg = load_config()
     date_str = datetime.now(JST).strftime("%Y-%m-%d")
 
+    sent_log = load_sent_log(retain_days=7)
+    print(f"[INFO] 配信履歴 {len(sent_log)}件を読み込み(直近7日分を保持)")
+
     weather = fetch_weather(cfg)
-    articles_by_category = fetch_rss_articles(cfg)
+    articles_by_category = fetch_rss_articles(cfg, sent_log)
+
+    total_articles = sum(len(v) for v in articles_by_category.values())
+    print(f"[INFO] 新規記事 {total_articles}件を取得(既読は除外済み)")
 
     summary_length = cfg.get("summary_length", 200)
 
     for category, articles in articles_by_category.items():
         for art in articles:
             body_text = fetch_article_text(art["link"])
-            summary = summarize_with_gemini(art["title"], body_text, summary_length)
+            summary = summarize_with_gemini(art["title"], body_text, art["summary_hint"], summary_length)
             if not summary:
                 # AI要約に失敗した場合はRSSのdescriptionを使う。
                 # 350字に満たない場合はそのまま、超える場合は文の区切りで切る(単純な文字数カットで
@@ -273,7 +339,12 @@ def main():
                     last_period = cut.rfind("。")
                     summary = cut[:last_period + 1] if last_period > summary_length * 0.5 else cut
             art["summary"] = summary
-            time.sleep(1)  # 無料枠のRPM対策として最低限の間隔を空ける
+            # この記事を配信済みとして記録(次回以降のfetch_rss_articlesで除外される)
+            sent_log[art["link"]] = datetime.now(JST).isoformat()
+            time.sleep(4.5)  # 無料枠のRPM制限(15RPM程度)に収めるため、1リクエストあたり十分な間隔を空ける
+
+    save_sent_log(sent_log)
+    print(f"[INFO] 配信履歴を更新 (計{len(sent_log)}件を保持)")
 
     BOOKS_DIR.mkdir(exist_ok=True)
     # 固定ファイル名で毎回上書きする(ライブラリ内で本が増え続けて埋もれるのを防ぐため)。
