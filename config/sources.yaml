@@ -90,3 +90,19 @@ summary_length: 350
 
 # 1回の実行で採用する最大記事数(カテゴリごと)
 max_articles_per_category: 15
+
+# --- 以下はAI編集長による記事選別機能(x4_news_digest.py)向けの設定 ---
+# 何時間以内に公開された記事を選別候補にするか
+lookback_hours: 72
+
+# 選別前にカテゴリごと何件まで候補を集めるか(ここから上の max_total_articles 件に絞り込む)
+candidate_per_category: 20
+
+# 1回のダイジェストに入れる記事の総数上限(本の厚さはここで決まる)
+max_total_articles: 15
+
+# 配信履歴(sent_articles.json)の保持日数。これより古い配信記録は削除され、再度候補に戻る
+retain_days: 7
+
+# Gemini API呼び出しの間隔(秒)。429(レート制限)が多い場合は増やす
+gemini_interval_seconds: 1.5
