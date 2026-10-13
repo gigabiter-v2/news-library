@@ -28,7 +28,7 @@ jobs:
         timeout-minutes: 15
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: python scripts/build_digest.py
+        run: python scripts/x4_news_digest.py
 
       - name: Commit and push
         run: |
