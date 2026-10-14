@@ -1,16 +1,12 @@
-# ニュース取得元設定
-# ここを編集するだけで取得対象を追加・変更できる
+# XTEINK X4 ニュース取得元設定 (2026-10-14 修正)
+# 医療・金融リテラシーの無効な仮RSSを現行フィードに差し替え
 
-# 気象庁 天気予報概況(公式JSON、非公式API扱いなので仕様変更リスクあり)
-# 地域コード一覧: https://www.jma.go.jp/bosai/common/const/area.json
 weather:
   enabled: true
-  area_code: "130000"   # 例: 東京 130000。必要に応じて変更してください
+  area_code: "130000"
   area_name: "東京"
   url_template: "https://www.jma.go.jp/bosai/forecast/data/overview_forecast/{code}.json"
 
-# 各カテゴリのRSS取得元
-# ※印のあるものは今回未検証。動かない場合はURLを見直してください
 rss_feeds:
   - name: "NHKニュース 経済"
     url: "https://www.nhk.or.jp/rss/news/cat5.xml"
@@ -52,19 +48,24 @@ rss_feeds:
     category: "car"
     enabled: true
 
-  # 未検証: 確実なRSS URLが見つからなかったため仮設定。動かない場合は要調査
-  - name: "日経メディカル(仮)"
-    url: "https://medical.nikkeibp.co.jp/rss/all.rdf"
+  # 日経メディカルの現行RSS（旧 /rss/all.rdf は無効）
+  - name: "日経メディカル"
+    url: "https://medical.nikkeibp.co.jp/all/info/feed/index.rdf"
     category: "medical"
     enabled: true
 
-  # 未検証: 確実なRSS URLが見つからなかったため仮設定。動かない場合は要調査
-  - name: "金融庁 報道発表(仮)"
-    url: "https://www.fsa.go.jp/rss/news.rdf"
+  # 金融庁の公式RSS（旧 /rss/news.rdf は無効）
+  - name: "金融庁 新着情報"
+    url: "https://www.fsa.go.jp/fsaNewsListAll_rss2.xml"
     category: "finance_literacy"
     enabled: true
 
-# キーワードフィルタ(このいずれかを含む記事タイトルのみ採用。空なら全件対象)
+  # 金融庁は行政発表が中心なので、実用的な投資知識を補う
+  - name: "All About 投資"
+    url: "https://rss.allabout.co.jp/aa/latest/ch/ch_investment/"
+    category: "finance_literacy"
+    enabled: true
+
 keyword_filter:
   economy:
     - "日銀"
@@ -85,24 +86,10 @@ keyword_filter:
   medical: []
   finance_literacy: []
 
-# 1トピック要約の目安文字数(通勤30分以上の読書時間を想定)
 summary_length: 350
-
-# 1回の実行で採用する最大記事数(カテゴリごと)
 max_articles_per_category: 15
-
-# --- 以下はAI編集長による記事選別機能(x4_news_digest.py)向けの設定 ---
-# 何時間以内に公開された記事を選別候補にするか
 lookback_hours: 72
-
-# 選別前にカテゴリごと何件まで候補を集めるか(ここから上の max_total_articles 件に絞り込む)
 candidate_per_category: 20
-
-# 1回のダイジェストに入れる記事の総数上限(本の厚さはここで決まる)
 max_total_articles: 15
-
-# 配信履歴(sent_articles.json)の保持日数。これより古い配信記録は削除され、再度候補に戻る
 retain_days: 7
-
-# Gemini API呼び出しの間隔(秒)。429(レート制限)が多い場合は増やす
 gemini_interval_seconds: 1.5
