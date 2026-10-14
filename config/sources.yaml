@@ -92,4 +92,4 @@ lookback_hours: 72
 candidate_per_category: 20
 max_total_articles: 15
 retain_days: 7
-gemini_interval_seconds: 1.5
+gemini_interval_seconds: 6
