@@ -18,6 +18,7 @@ from difflib import SequenceMatcher
 from html import unescape
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from xml.etree import ElementTree as ET
 from xml.sax.saxutils import escape, quoteattr
 
 import feedparser
@@ -46,7 +47,15 @@ SITE_BASE_URL = os.getenv("SITE_BASE_URL", "https://gigabiter-v2.github.io/news-
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 # 既存環境変数で上書きできる。APIに存在するモデル名を指定すること。
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
-GEMINI_ENDPOINT = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+# 主モデルが429/503等で使えないとき、順に試す予備モデル（モデルごとに利用枠と混雑が別）。
+# 公式モデル一覧(2026-10確認)で安定版の表記。GEMINI_FALLBACK_MODELS(カンマ区切り)で上書き可。
+GEMINI_FALLBACK_MODELS = [m.strip() for m in os.getenv(
+    "GEMINI_FALLBACK_MODELS", "gemini-3.8-flash,gemini-3.5-flash-lite").split(",") if m.strip()]
+GEMINI_MODELS = list(dict.fromkeys([GEMINI_MODEL] + GEMINI_FALLBACK_MODELS))
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+GEMINI_MODEL_COOLDOWN_SECONDS = 90  # 全リトライ失敗したモデルを一時的に飛ばす時間
+_MODEL_BLOCKED_UNTIL = {}
+GEMINI_STATS = {"requests": 0, "ok": 0}
 
 # ファイル一覧・書名順・OPDSの「著者 - 書名」保存形式、全てで先頭を狙う。
 # CrossPointの並べ替え設定や既存ファイル名によっては先頭を保証できない。
@@ -83,15 +92,54 @@ def load_config():
     return cfg
 
 
+def _strip_markup_once(text):
+    text = re.sub(r"<!\[CDATA\[|\]\]>", " ", text)  # CDATAの目印が文字として残る配信がある
+    if BeautifulSoup:
+        text = BeautifulSoup(text, "html.parser").get_text(" ", strip=True)
+    else:
+        text = re.sub(r"<[^>]*>", " ", text)
+    return unescape(text)
+
+
 def clean_text(text):
-    """RSSに入ったHTMLタグと空白を除去。ニュースの文字だけを扱う。"""
+    """RSSに入ったHTMLタグと空白を除去。ニュースの文字だけを扱う。
+
+    All Aboutのように、HTMLが二重にエスケープされた配信にも対応するため、
+    タグが残っている間は最大3回まで繰り返す。
+    """
     if not text:
         return ""
-    if BeautifulSoup:
-        text = BeautifulSoup(str(text), "html.parser").get_text(" ", strip=True)
-    else:
-        text = re.sub(r"<[^>]*>", " ", str(text))
-    return re.sub(r"\s+", " ", unescape(text)).strip()
+    text = _strip_markup_once(str(text))
+    for _ in range(2):
+        if "<" not in text or ">" not in text:
+            break
+        text = _strip_markup_once(text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def raw_descriptions(content):
+    """feedparserが説明文を空にしてしまう配信（例: All About）を、生のXMLから救済する。
+
+    戻り値: {記事URL: 説明文(生テキスト)}。パースできなければ空。
+    """
+    found = {}
+    try:
+        root = ET.fromstring(content)
+    except ET.ParseError:
+        return found
+    for node in root.iter():
+        if node.tag.rsplit("}", 1)[-1] not in ("item", "entry"):
+            continue
+        link, desc = "", ""
+        for child in node:
+            name = child.tag.rsplit("}", 1)[-1]
+            if name == "link":
+                link = (child.text or child.get("href") or "").strip() or link
+            elif name in ("description", "summary", "encoded") and not desc:
+                desc = child.text or ""
+        if link and desc.strip():
+            found[link] = desc
+    return found
 
 
 def normalized_url(url):
@@ -204,10 +252,13 @@ def fetch_rss_candidates(cfg, sent_log):
         if isinstance(keywords, str):
             keywords = [keywords]
         bucket = buckets.setdefault(cat, [])
+        raw_desc = raw_descriptions(response.content)
         for entry in parsed.entries:
             title = clean_text(entry.get("title", ""))
             url = normalized_url(entry.get("link", ""))
             hint = clean_text(entry.get("summary", entry.get("description", "")))
+            if not hint:  # feedparserが空にした説明文を生XMLから補う
+                hint = clean_text(raw_desc.get(entry.get("link", ""), ""))
             if not title or not url or url in existing:
                 continue
             if keywords and not any(str(k).casefold() in (title + " " + hint).casefold() for k in keywords):
@@ -246,30 +297,56 @@ def fallback_rank(article, priorities):
             min(1, len(article["summary_hint"]) / 400))
 
 
+def _gemini_error_detail(response):
+    """Googleが返すエラー本文（割当超過か混雑かの手がかり）を短く取り出す。APIキーは含まれない。"""
+    try:
+        message = response.json().get("error", {}).get("message", "")
+    except (ValueError, AttributeError):
+        message = ""
+    return re.sub(r"\s+", " ", message or response.text or "")[:220]
+
+
 def gemini_json(prompt, *, max_retries=2):
-    """JSONだけ要求。429/5xxのみ短いリトライ; 失敗時は安全なフォールバック。"""
+    """JSONだけ要求。429/5xxは短いリトライ後に予備モデルへ切り替え、全滅ならNone。
+
+    None のときは呼び出し側がRSS抜粋などの安全なフォールバックを使う。
+    """
     if not GEMINI_API_KEY:
         return None
     payload = {"contents": [{"parts": [{"text": prompt}]}],
                "generationConfig": {"responseMimeType": "application/json", "temperature": 0.2}}
-    for attempt in range(max_retries + 1):
-        try:
-            r = SESSION.post(GEMINI_ENDPOINT, headers={"x-goog-api-key": GEMINI_API_KEY},
-                             json=payload, timeout=45)
-            if r.status_code in (429, 500, 502, 503, 504) and attempt < max_retries:
-                retry_after = r.headers.get("Retry-After", "")
-                delay = int(retry_after) if retry_after.isdigit() else 5 * (attempt + 1)
-                time.sleep(min(delay, 30))
-                continue
-            r.raise_for_status()
-            data = r.json()
-            result = "".join(x.get("text", "") for x in data["candidates"][0]["content"]["parts"])
-            result = re.sub(r"^```(?:json)?\s*|\s*```$", "", result.strip())
-            return json.loads(result)
-        except (requests.RequestException, ValueError, KeyError, IndexError, TypeError) as exc:
-            log(f"Geminiリクエスト失敗 ({attempt + 1}回目): {exc}", warn=True)
-            return None
-    log("Geminiのレート制限が解消しないためRSS情報で継続", warn=True)
+    for model in GEMINI_MODELS:
+        if time.time() < _MODEL_BLOCKED_UNTIL.get(model, 0):
+            continue
+        endpoint = GEMINI_URL.format(model=model)
+        for attempt in range(max_retries + 1):
+            try:
+                GEMINI_STATS["requests"] += 1
+                r = SESSION.post(endpoint, headers={"x-goog-api-key": GEMINI_API_KEY},
+                                 json=payload, timeout=45)
+                if r.status_code in (429, 500, 502, 503, 504):
+                    log(f"Gemini混雑/制限 {model} HTTP {r.status_code} ({attempt + 1}回目): "
+                        f"{_gemini_error_detail(r)}", warn=True)
+                    if attempt < max_retries:
+                        retry_after = r.headers.get("Retry-After", "")
+                        delay = int(retry_after) if retry_after.isdigit() else 5 * (attempt + 1)
+                        time.sleep(min(delay, 30))
+                        continue
+                    _MODEL_BLOCKED_UNTIL[model] = time.time() + GEMINI_MODEL_COOLDOWN_SECONDS
+                    break  # 次のモデルへ
+                if r.status_code >= 400:
+                    log(f"Geminiエラー {model} HTTP {r.status_code}: {_gemini_error_detail(r)}", warn=True)
+                    break  # 次のモデルへ（モデル名不正など）
+                data = r.json()
+                result = "".join(x.get("text", "") for x in data["candidates"][0]["content"]["parts"])
+                result = re.sub(r"^```(?:json)?\s*|\s*```$", "", result.strip())
+                parsed = json.loads(result)
+                GEMINI_STATS["ok"] += 1
+                return parsed
+            except (requests.RequestException, ValueError, KeyError, IndexError, TypeError) as exc:
+                log(f"Geminiリクエスト失敗 {model} ({attempt + 1}回目): {exc}", warn=True)
+                break  # 次のモデルへ
+    log("すべてのGeminiモデルで失敗したためRSS情報で継続", warn=True)
     return None
 
 
@@ -386,8 +463,14 @@ def summarize_article(article, target_length):
                 "why": clean_text(result.get("why", ""))[:180],
                 "source_quality": "本文から要約" if body else "RSS抜粋から要約"}
     # RSS抜粋以上のことは書かない。
-    return {"summary": hint[:max(120, target_length)].rstrip("、， ") or "元記事をご確認ください。",
-            "why": "", "source_quality": "RSS抜粋を掲載（AI要約なし）"}
+    if not hint:
+        return {"summary": "この配信元は概要を配信していないため、見出しのみの掲載です。元記事をご確認ください。",
+                "why": "", "source_quality": "見出しのみ（AI要約なし）"}
+    limit = max(120, target_length)
+    excerpt = hint[:limit].rstrip("、， ")
+    if len(hint) > limit and not excerpt.endswith("…"):
+        excerpt += "…"  # 文の途中で切れたことが分かるようにする
+    return {"summary": excerpt, "why": "", "source_quality": "RSS抜粋を掲載（AI要約なし）"}
 
 
 def build_epub(date_str, weather, articles_by_category, output_path):
@@ -496,9 +579,14 @@ def main():
         log("trafilatura未導入。本文抽出は簡易モードです", warn=True)
     for i, a in enumerate(all_selected, 1):
         log(f"要約 {i}/{len(all_selected)}: {a['title'][:45]}")
+        calls_before = GEMINI_STATS["requests"]
         a.update(summarize_article(a, target_length))
-        if i < len(all_selected):
+        # Gemini を実際に呼んだときだけ間隔を空ける（呼んでいなければ待たない）。
+        if i < len(all_selected) and GEMINI_STATS["requests"] != calls_before:
             time.sleep(float(cfg.get("gemini_interval_seconds", 1.5)))
+    if GEMINI_API_KEY:
+        log(f"Gemini集計: 成功{GEMINI_STATS['ok']}回 / 呼び出し{GEMINI_STATS['requests']}回"
+            f"（失敗した記事はRSS抜粋で代替）")
 
     BOOKS_DIR.mkdir(parents=True, exist_ok=True)
     epub_path = BOOKS_DIR / BOOK_FILENAME
