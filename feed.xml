@@ -2,13 +2,13 @@
 <feed xmlns="http://www.w3.org/2005/Atom">
   <id>urn:uuid:50f2d2d2-12fe-5d6c-805d-10e38808d626</id>
   <title>X4ニュースライブラリ</title>
-  <updated>2026-10-24T08:48:57.885399+09:00</updated>
+  <updated>2026-10-25T08:06:51.347444+09:00</updated>
   <link rel="self" href="https://gigabiter-v2.github.io/news-library/feed.xml" type="application/atom+xml;profile=opds-catalog;kind=acquisition"/>
   <entry>
     <title>0000 今日のニュース</title>
     <id>urn:uuid:c4e4cdfe-4835-5442-b3f9-a43954067a74</id>
     <author><name>0000_X4</name></author>
-    <updated>2026-10-24T08:48:57.885399+09:00</updated>
+    <updated>2026-10-25T08:06:51.347444+09:00</updated>
     <summary>毎日更新されるニュース（書名とファイル名は固定、日付は本文に記載）</summary>
     <link rel="http://opds-spec.org/acquisition" href="https://gigabiter-v2.github.io/news-library/books/0000_X4_NEWS.epub" type="application/epub+zip"/>
   </entry>
