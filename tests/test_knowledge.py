@@ -317,6 +317,31 @@ class GeminiTests(unittest.TestCase):
                 kd.Gemini(['m1', 'm2']).ask('p')
         self.assertIn('HTTP 429', str(cm.exception))
 
+    def test_quota_details_are_logged(self):
+        body = {'error': {'message': 'You exceeded your current quota.', 'details': [
+            {'@type': 'type.googleapis.com/google.rpc.QuotaFailure',
+             'violations': [{'quotaMetric': 'generativelanguage.googleapis.com/generate_content_free_tier_requests',
+                             'quotaId': 'GenerateRequestsPerMinutePerProjectPerModel-FreeTier'}]},
+            {'@type': 'type.googleapis.com/google.rpc.RetryInfo', 'retryDelay': '12s'}]}}
+        detail = kd.gemini_error_detail(FakeResponse(429, body))
+        self.assertIn('PerMinutePerProjectPerModel-FreeTier', detail)
+        self.assertIn('retryDelay=12s', detail)
+        self.assertEqual(kd.gemini_error_info(FakeResponse(500, None, text='plain'))[0], 'plain')
+
+    def test_daily_quota_skips_retries_on_same_model(self):
+        body = {'error': {'message': 'quota', 'details': [
+            {'violations': [{'quotaId': 'GenerateRequestsPerDayPerProjectPerModel-FreeTier'}]}]}}
+        calls = []
+
+        def post(url, **kw):
+            calls.append(url)
+            if '/day:' in url:
+                return FakeResponse(429, body)
+            return FakeResponse(200, gemini_body('{"ok":1}'))
+        with mock.patch.object(kd.requests, 'post', side_effect=post):
+            self.assertEqual(kd.Gemini(['day', 'good']).ask('p'), {'ok': 1})
+        self.assertEqual(sum('/day:' in c for c in calls), 1)
+
 
 # ---- 資料取得 -----------------------------------------------------------------
 
