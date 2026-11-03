@@ -1026,6 +1026,39 @@ class TrimUnsupportedTests(TempEnv):
         prompt = ai.ask.call_args[0][0]
         self.assertIn('言い換えて述べるだけ', prompt)
         self.assertIn('interpretation段落に分け', prompt)
+        self.assertIn('時制・範囲・断定の強さを変えない', prompt)  # 「考えられている」→「普及した」型の言い換えを防ぐ
+
+    def test_audit_prompt_checks_tense_scope_and_ending(self):
+        ai = mock.Mock()
+        ai.ask.return_value = {'pass': True, 'issues': []}
+        s = sentences(10)
+        facts = [{'id': f'F{i + 1}', 'claim': s[i], 'source_id': 'S1', 'evidence_excerpt': s[i]} for i in range(10)]
+        kd.audit_article(make_article([f['id'] for f in facts]), facts, ai)
+        prompt = ai.ask.call_args[0][0]
+        self.assertIn('時制・適用範囲・断定の強さ', prompt)
+        self.assertIn('冒頭と結びも', prompt)
+
+    ADVICE = 'この分析を日々の経営判断に活かすことで、企業はより強固な収益基盤を築くことができるだろう。'
+    RECAP = '経済学では利子の扱いに国ごとの違いがあり、会計学上の固定費は数年という長期では売上高の増加に応じて増えることが多い。'
+
+    def test_ending_keeps_supported_recap_and_drops_unsupported_advice(self):
+        art = {'chapters': [], 'ending': {'text': self.RECAP + self.ADVICE, 'fact_ids': ['F1', 'F3']}}
+        self.assertEqual(kd.trim_unsupported(art, self.FACTS), [self.ADVICE])
+        self.assertEqual(art['ending']['text'], self.RECAP)
+
+    def test_ending_is_never_emptied(self):
+        art = {'chapters': [], 'ending': {'text': self.ADVICE, 'fact_ids': ['F1']}}
+        self.assertEqual(kd.trim_unsupported(art, self.FACTS), [])
+        self.assertEqual(art['ending']['text'], self.ADVICE)
+
+
+class HeroLabelTests(unittest.TestCase):
+    def test_label_is_never_cut_in_the_middle_of_a_title(self):
+        self.assertEqual(kd.hero_label('損益分岐点とは何か：固定費と変動費で見る利益の仕組み'), '損益分岐点とは何か')
+        self.assertEqual(kd.hero_label('短い題名'), '短い題名')
+        label = kd.hero_label('ゼンメルワイスと産褥熱手洗いをめぐる長い長い歴史のものがたり')
+        self.assertTrue(label.endswith('…'))
+        self.assertLessEqual(len(label), 19)
 
 
 class ArticlePromptTests(TempEnv):
