@@ -50,6 +50,13 @@ UA = 'X4KnowledgeLibrary/1.1 (public-source educational EPUB builder)'
 GEMINI_URL = 'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent'
 # Google検索の検索結果URIは一度このホストを経由して実ページへリダイレクトされる。
 REDIRECT_HOSTS = {'vertexaisearch.cloud.google.com'}
+WIKI_API = 'https://ja.wikipedia.org/w/api.php'
+# 参考文献リンクのうち、独立した裏付けにならない・本文を取得する価値が低いドメイン（登録ドメイン単位）
+SKIP_DOMAINS = {
+    'wikipedia.org', 'wikimedia.org', 'wikidata.org', 'archive.org', 'archive.today', 'archive.ph', 'archive.is',
+    'google.com', 'google.co.jp', 'youtube.com', 'youtu.be', 'twitter.com', 'x.com', 'facebook.com', 'instagram.com',
+    'amazon.co.jp', 'amazon.com', 'rakuten.co.jp', 'doi.org', 'worldcat.org', 'ndl.go.jp', 'cir.nii.ac.jp',
+}
 CHARS_PER_MINUTE = 500  # 日本語電子書籍の読書速度の目安（所要時間表示用）
 ALLOWED_MIMES = ('text/html', 'text/plain', 'application/xhtml+xml', 'application/pdf')
 FONT_PATHS = [
@@ -377,11 +384,11 @@ def source_domain_key(host):
     return '.'.join(parts[-2:])
 
 
-def gather_sources(topic, ai, max_sources=5, min_sources=2, per_domain=2, budget_seconds=240):
-    """検索で見つけた実在ページを取得する。
+def grounded_candidates(topic, ai):
+    """Google検索グラウンディング(課金設定済みのAPIキー向け)で資料候補 (URL, 表示名, 経路) を集める。
 
     候補は (1) Google検索が実際に返した結果URL (groundingMetadata) と
-    (2) モデルが列挙したURL の両方。取得に成功したページ本文だけを資料にする。
+    (2) モデルが列挙したURL の両方。
     """
     prompt = (
         'あなたは史実と公的資料を調査する日本語編集者。次のテーマについて原典を探す。\n'
@@ -408,11 +415,91 @@ def gather_sources(topic, ai, max_sources=5, min_sources=2, per_domain=2, budget
         if url not in seen and safe_url(url):
             seen.add(url)
             candidates.append((url, hint.lower(), 'search' if (url, hint) in grounded else 'listed'))
-    # Wikipedia は最後に回し、一次・公式資料を先に取得する。
-    candidates.sort(key=lambda row: 'wikipedia' in row[1])
+    return candidates
+
+
+def wiki_api(params):
+    """MediaWiki Action API (ja.wikipedia.org)。API利用規約に従いUser-Agentを明示する。"""
+    r = requests.get(WIKI_API, params=dict(params, format='json', formatversion='2'),
+                     headers={'User-Agent': UA}, timeout=(10, 25))
+    r.raise_for_status()
+    return r.json()
+
+
+def wikipedia_candidates(topic, ai, per_page=8, max_external=18):
+    """検索グラウンディングを使えない環境(無料枠のAPIキー)での資料探し。
+
+    1. モデルに検索語・記事名の候補を挙げさせる(Webには接続しない通常呼び出し)。
+    2. MediaWiki APIで実在する記事だけを残し、記事URLと、記事が参考文献として挙げる外部リンクを集める。
+    外部リンク先は通常の取得手順(HTTPS限定・robots.txt・サイズ制限)で本文を取る。
+    モデルが挙げたURLも候補に加えるが、取得できたページ本文との一致でしか事実にならない。
+    """
+    prompt = (
+        'あなたは史実と公的資料を調査する日本語編集者。次のテーマの原典を探す準備として、'
+        '日本語Wikipediaで調べる検索語と記事名の候補を挙げる。\n'
+        f'テーマ: {topic["title"]}\n'
+        '記事名は実在が確実なものだけを書く。公式サイトや公的資料のURLは、確実に存在するものだけを任意で挙げ、推測で作らない。\n'
+        '返答はJSONのみ: {"queries":["検索語", ...最大4件],"titles":["記事名", ...最大5件],"urls":["https://...", ...最大4件]}'
+    )
+    queries, titles, listed = [], [], []
+    try:
+        data = ai.ask(prompt)
+        if isinstance(data, dict):
+            queries = [q for q in (data.get('queries') or []) if isinstance(q, str)][:4]
+            titles = [t for t in (data.get('titles') or []) if isinstance(t, str)][:5]
+            listed = [u.strip() for u in (data.get('urls') or []) if isinstance(u, str)][:4]
+    except GeminiError as exc:
+        log(f'検索語の生成に失敗: {str(exc)[:120]}')
+    for q in queries:
+        try:
+            hits = wiki_api({'action': 'query', 'list': 'search', 'srsearch': q, 'srlimit': 3, 'srnamespace': 0})
+            titles += [h['title'] for h in hits['query']['search'] if isinstance(h.get('title'), str)]
+        except (requests.RequestException, ValueError, KeyError, TypeError) as exc:
+            log(f'Wikipedia検索に失敗 ({q[:20]}): {type(exc).__name__}')
+        time.sleep(0.3)
+    titles = list(dict.fromkeys(t.strip() for t in titles if t.strip()))[:8]
+    pages = []
+    if titles:
+        try:
+            data = wiki_api({'action': 'query', 'prop': 'extlinks', 'titles': '|'.join(titles), 'redirects': 1,
+                             'ellimit': 'max', 'elprotocol': 'https'})
+            pages = [p for p in data['query']['pages'] if isinstance(p, dict) and not p.get('missing')]
+        except (requests.RequestException, ValueError, KeyError, TypeError) as exc:
+            log(f'Wikipedia記事情報の取得に失敗: {type(exc).__name__}')
+    candidates, seen = [], set()
+    external = []
+    for page in pages:
+        count = 0
+        for link in page.get('extlinks') or []:
+            url = link.get('url') if isinstance(link, dict) else None
+            host = urlparse(url).hostname if isinstance(url, str) else None
+            if not host or not safe_url(url) or url in seen or source_domain_key(host) in SKIP_DOMAINS:
+                continue
+            seen.add(url)
+            external.append((url, host.lower(), 'wikiref'))
+            count += 1
+            if count >= per_page:
+                break
+    for url in listed:
+        if url not in seen and safe_url(url):
+            seen.add(url)
+            candidates.append((url, (urlparse(url).hostname or '').lower(), 'listed'))
+    wiki = [('https://ja.wikipedia.org/wiki/' + url_quote(str(p['title']).replace(' ', '_'), safe=''), 'ja.wikipedia.org', 'wiki')
+            for p in pages]
+    log(f'Wikipedia記事{len(pages)}件 / 参考文献リンク{len(external)}件 / モデル記載URL{len(listed)}件')
+    # 最初の記事を本文の土台に、続いて参考文献先(一次・公式資料)、残りの記事の順に試す。
+    return wiki[:1] + external[:max_external] + candidates + wiki[1:]
+
+
+def gather_sources(topic, ai, max_sources=5, min_sources=2, per_domain=2, budget_seconds=240, use_search=True):
+    """実在ページを取得し、取得に成功したページ本文だけを資料にする。"""
+    candidates = grounded_candidates(topic, ai) if use_search else wikipedia_candidates(topic, ai)
+    if use_search:
+        # Wikipedia は最後に回し、一次・公式資料を先に取得する。
+        candidates.sort(key=lambda row: 'wikipedia' in row[1])
     sources, domains, finals = [], {}, set()
     started = time.time()
-    for url, hint, via in candidates[:16]:
+    for url, hint, via in candidates[:16 if use_search else 30]:
         if time.time() - started > budget_seconds:
             log('資料取得の時間上限に達しました')
             break
@@ -690,7 +777,8 @@ def prepare_one(topic, cfg, ai, auditor=None):
     """auditor(独立した校閲役のモデル)があれば、執筆役とは別モデルで監査する。"""
     auditor = auditor or ai
     log(f'調査開始: {topic["title"]}')
-    sources = gather_sources(topic, ai, min_sources=int(cfg.get('source_min', 2)))
+    sources = gather_sources(topic, ai, min_sources=int(cfg.get('source_min', 2)),
+                             use_search=bool(cfg.get('search_grounding', False)))
     facts = extract_facts(topic, sources, ai, int(cfg['fact_min']))
     facts = audit_facts(facts, sources, auditor, int(cfg['fact_min']))
     article = write_article(topic, sources, facts, ai, cfg)
