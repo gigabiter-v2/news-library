@@ -59,6 +59,8 @@ SKIP_DOMAINS = {
     # 図書館の典拠・目録レコード（Wikipediaの「典拠管理」欄）。本文がほぼ無く出典にならない。
     'dnb.de', 'd-nb.info', 'bnf.fr', 'loc.gov', 'viaf.org', 'isni.org', 'nla.gov.au', 'archives.gov',
     'openlibrary.org', 'goodreads.com', 'imdb.com',
+    # Wikimedia系の運営・ツール用ページ（Wikipedia Library等）。題材の資料ではない。
+    'wmflabs.org', 'toolforge.org', 'mediawiki.org', 'wiktionary.org', 'wikibooks.org', 'wikiquote.org', 'wikisource.org',
 }
 CHARS_PER_MINUTE = 500  # 日本語電子書籍の読書速度の目安（所要時間表示用）
 ALLOWED_MIMES = ('text/html', 'text/plain', 'application/xhtml+xml', 'application/pdf')
