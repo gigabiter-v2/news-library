@@ -128,7 +128,7 @@ def make_article(ids):
     }
 
 
-TEST_CFG = dict(CFG, article_min_chars=100, article_max_chars=9000, fact_min=6, search_grounding=True)
+TEST_CFG = dict(CFG, article_min_chars=100, article_max_chars=9000, fact_min=6, search_grounding=True, source_min_chars=0)
 
 
 class TempEnv(unittest.TestCase):
@@ -490,6 +490,26 @@ class WikiCandidateTests(TempEnv):
                 mock.patch.object(kd.time, 'sleep', lambda s: None):
             rows = kd.wikipedia_candidates({'title': 't'}, ai)
         self.assertEqual([r[0] for r in rows], ['https://official.example.org/p'])
+
+    def test_skips_catalog_records_and_short_pages(self):
+        ai = FakeAI(sources_urls=['http://insecure.example.org/x'])  # httpは除外される
+        with mock.patch.object(kd, 'wiki_api', side_effect=self.fake_api_with_catalogs), mock.patch.object(kd.time, 'sleep', lambda s: None):
+            rows = kd.wikipedia_candidates({'title': 't'}, ai)
+        self.assertEqual([r[0] for r in rows[1:]], ['https://www.example-corp.co.jp/history'])
+        pages = {u: dict(fake_source('x', u.split('/')[2]), url=u) for u in
+                 ('https://ja.wikipedia.org/wiki/A', 'https://www.example-corp.co.jp/history')}
+        pages['https://ja.wikipedia.org/wiki/A']['text'] = 'あ' * 300  # 短すぎる
+        cand = [(u, u.split('/')[2], 'wiki') for u in pages]
+        with mock.patch.object(kd, 'wikipedia_candidates', return_value=cand), mock.patch.object(kd, 'fetch_public', side_effect=lambda u: dict(pages[u])):
+            with self.assertRaises(ValueError):  # 長い資料が1ドメインだけ
+                kd.gather_sources({'title': 't'}, FakeAI(), use_search=False, min_chars=400)
+
+    def fake_api_with_catalogs(self, params):
+        if params.get('list') == 'search':
+            return {'query': {'search': [{'title': 'A'}]}}
+        return {'query': {'pages': [{'title': 'A', 'extlinks': [
+            {'url': 'https://portal.dnb.de/opac.htm?x=1'}, {'url': 'https://catalogue.bnf.fr/ark:/1'},
+            {'url': 'https://id.loc.gov/authorities/n1'}, {'url': 'https://www.example-corp.co.jp/history'}]}]}}
 
     def test_gather_without_search_needs_two_independent_domains(self):
         ai = FakeAI()
