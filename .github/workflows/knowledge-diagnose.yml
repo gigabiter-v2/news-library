@@ -1,0 +1,57 @@
+name: Knowledge Gemini Diagnose
+
+# 手動実行専用の診断用ワークフロー。Gemini APIの割当・検索グラウンディング可否を小さく確認するだけで、リポジトリは変更しない。
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Probe Gemini models
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          python3 - <<'PY'
+          import json, os, time, urllib.request, urllib.error
+          key = os.environ['GEMINI_API_KEY']
+          base = 'https://generativelanguage.googleapis.com/v1beta'
+
+          def call(url, payload=None):
+              data = json.dumps(payload).encode() if payload is not None else None
+              req = urllib.request.Request(url, data=data, headers={'x-goog-api-key': key, 'Content-Type': 'application/json'})
+              try:
+                  with urllib.request.urlopen(req, timeout=90) as r:
+                      return r.status, json.loads(r.read().decode())
+              except urllib.error.HTTPError as e:
+                  body = e.read().decode('utf-8', 'replace')
+                  try:
+                      return e.code, json.loads(body)
+                  except ValueError:
+                      return e.code, {'raw': body[:300]}
+
+          status, data = call(base + '/models?pageSize=200')
+          names = sorted(m.get('name', '').replace('models/', '') for m in data.get('models', []) if 'gemini' in m.get('name', ''))
+          print('models list status', status, names)
+          for model in ['gemini-3.8-flash', 'gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-3.5-flash-lite']:
+              for search in (False, True):
+                  payload = {'contents': [{'parts': [{'text': '日本の首都を一語で答えてください。'}]}],
+                             'generationConfig': {'maxOutputTokens': 256}}
+                  if search:
+                      payload['tools'] = [{'google_search': {}}]
+                  status, data = call(base + '/models/' + model + ':generateContent', payload)
+                  label = model + (' +search' if search else ' plain')
+                  if status == 200:
+                      cand = (data.get('candidates') or [{}])[0]
+                      grounded = bool((cand.get('groundingMetadata') or {}).get('webSearchQueries'))
+                      print('PROBE', label, status, 'grounded' if grounded else 'no-grounding', 'tokens', (data.get('usageMetadata') or {}).get('totalTokenCount'))
+                  else:
+                      err = data.get('error', data) if isinstance(data, dict) else {}
+                      print('PROBE', label, status, str(err.get('message', err))[:400].replace(chr(10), ' '), json.dumps(err.get('details', ''), ensure_ascii=False)[:300])
+                  time.sleep(5)
+          PY
