@@ -1,14 +1,14 @@
 {
   "case_fujifilm": {
-    "last_try": "2026-11-03T14:37:09.779833+09:00",
-    "reason": "Geminiが全モデルで失敗: gemini-3.8-flash: HTTP 429 | gemini-3.8-flash: HTTP 429 | gemini-3.6-flash: HTTP 429 | gemini-3.6-flash: HTTP 429 | gemini-3.6-flash: HTTP 429"
+    "last_try": "2026-11-03T14:53:17.364328+09:00",
+    "reason": "独立したドメイン2件以上の資料取得に失敗 (取得0件)"
   },
   "hosp_cssd_role": {
-    "last_try": "2026-11-03T14:38:10.166568+09:00",
-    "reason": "Geminiが全モデルで失敗: gemini-3.8-flash: HTTP 429 | gemini-3.8-flash: HTTP 429 | gemini-3.6-flash: HTTP 429 | gemini-3.6-flash: HTTP 429 | gemini-3.6-flash: HTTP 429"
+    "last_try": "2026-11-03T14:52:45.111147+09:00",
+    "reason": "独立したドメイン2件以上の資料取得に失敗 (取得0件)"
   },
   "biz_breakeven": {
-    "last_try": "2026-11-03T14:39:10.820830+09:00",
-    "reason": "Geminiが全モデルで失敗: gemini-3.8-flash: HTTP 429 | gemini-3.8-flash: HTTP 429 | gemini-3.6-flash: HTTP 429 | gemini-3.6-flash: HTTP 429 | gemini-3.6-flash: HTTP 429"
+    "last_try": "2026-11-03T14:52:33.128409+09:00",
+    "reason": "Geminiが全モデルで失敗: gemini-3.6-flash: HTTP 429 | gemini-3.7-flash: HTTP 429 | gemini-3.5-flash: HTTP 429 | gemini-3.8-flash: HTTP 429"
   }
 }
