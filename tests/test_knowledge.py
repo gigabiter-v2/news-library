@@ -86,8 +86,13 @@ class FakeAI:
         self.article_audits = list(article_audit or [{'pass': True, 'issues': []}])
         self.calls = []
         self.pages = {}
+        self.search_flags = []
 
     def ask(self, prompt, search=False, json_mode=True):
+        self.search_flags.append(search)
+        if '記事名の候補を挙げる' in prompt:
+            self.calls.append('seed')
+            return {'queries': ['検索語A'], 'titles': ['試験記事'], 'urls': list(self.sources_urls)}
         if '原典を探す' in prompt:
             self.calls.append('search')
             return json.dumps({'sources': [{'url': u, 'reason': 'r'} for u in self.sources_urls]})
@@ -123,7 +128,7 @@ def make_article(ids):
     }
 
 
-TEST_CFG = dict(CFG, article_min_chars=100, article_max_chars=9000, fact_min=6)
+TEST_CFG = dict(CFG, article_min_chars=100, article_max_chars=9000, fact_min=6, search_grounding=True)
 
 
 class TempEnv(unittest.TestCase):
@@ -452,6 +457,56 @@ class GatherTests(TempEnv):
         self.assertEqual(len(self.run_gather(ai, pages)), 2)
 
 
+class WikiCandidateTests(TempEnv):
+    """検索グラウンディングを使えないキー(無料枠)向けの資料探し。"""
+
+    def fake_api(self, params):
+        if params.get('list') == 'search':
+            return {'query': {'search': [{'title': '富士フイルム'}, {'title': '存在しない記事'}]}}
+        self.assertEqual(params['prop'], 'extlinks')
+        return {'query': {'pages': [
+            {'title': '富士フイルム', 'extlinks': [
+                {'url': 'https://www.fujifilm.com/about/history'},
+                {'url': 'http://insecure.example.com/x'},
+                {'url': 'https://web.archive.org/web/2020/https://x.example.com'},
+                {'url': 'https://www.fujifilm.com/about/history'},
+                {'url': 'https://news.example.co.jp/a'}]},
+            {'title': '存在しない記事', 'missing': True}]}}
+
+    def test_collects_real_article_references_and_orders_candidates(self):
+        ai = FakeAI(sources_urls=['https://official.example.org/p', 'http://bad.example.org/p'])
+        with mock.patch.object(kd, 'wiki_api', side_effect=self.fake_api), mock.patch.object(kd.time, 'sleep', lambda s: None):
+            rows = kd.wikipedia_candidates({'title': 't'}, ai)
+        self.assertEqual([r[0] for r in rows], [
+            'https://ja.wikipedia.org/wiki/' + kd.url_quote('富士フイルム', safe=''),
+            'https://www.fujifilm.com/about/history', 'https://news.example.co.jp/a',
+            'https://official.example.org/p'])
+        self.assertEqual([r[2] for r in rows], ['wiki', 'wikiref', 'wikiref', 'listed'])
+        self.assertEqual(ai.search_flags, [False])  # Google検索つき呼び出しはしない
+
+    def test_wikipedia_api_failure_does_not_crash(self):
+        ai = FakeAI(sources_urls=['https://official.example.org/p'])
+        with mock.patch.object(kd, 'wiki_api', side_effect=kd.requests.ConnectionError('down')), \
+                mock.patch.object(kd.time, 'sleep', lambda s: None):
+            rows = kd.wikipedia_candidates({'title': 't'}, ai)
+        self.assertEqual([r[0] for r in rows], ['https://official.example.org/p'])
+
+    def test_gather_without_search_needs_two_independent_domains(self):
+        ai = FakeAI()
+        pages = {u: dict(fake_source('x', u.split('/')[2]), url=u) for u in
+                 ('https://ja.wikipedia.org/wiki/A', 'https://ja.wikipedia.org/wiki/B', 'https://b.example.org/p')}
+
+        def fetch(url):
+            return dict(pages[url])
+        rows = [(u, u.split('/')[2], 'wiki') for u in pages]
+        with mock.patch.object(kd, 'wikipedia_candidates', return_value=rows), mock.patch.object(kd, 'fetch_public', side_effect=fetch):
+            sources = kd.gather_sources({'title': 't'}, ai, use_search=False)
+        self.assertEqual([s['domain'] for s in sources], ['ja.wikipedia.org', 'ja.wikipedia.org', 'b.example.org'])
+        with mock.patch.object(kd, 'wikipedia_candidates', return_value=rows[:2]), mock.patch.object(kd, 'fetch_public', side_effect=fetch):
+            with self.assertRaises(ValueError):
+                kd.gather_sources({'title': 't'}, ai, use_search=False)
+
+
 # ---- 事実抽出・監査・原稿 ----------------------------------------------------------
 
 class FactAuditTests(unittest.TestCase):
@@ -563,6 +618,21 @@ class PipelineTests(TempEnv):
         self.assertFalse((kd.QUEUE / 't_demo.json').exists())
         self.assertTrue((kd.ARCHIVE / '2026-11-03_t_demo.json').exists())
         self.assertEqual(json.loads(kd.HISTORY.read_text(encoding='utf-8'))[0]['topic_id'], 't_demo')
+
+    def test_pipeline_without_search_grounding_uses_wikipedia_seeds(self):
+        ai = FakeAI()
+        cfg = dict(TEST_CFG, search_grounding=False)
+        ai.pages = {'S1': self.pages['https://a.example.co.jp/p'], 'S2': self.pages['https://b.example.org/p']}
+        with mock.patch.object(kd, 'fetch_public', side_effect=lambda url: dict(self.pages[url])), \
+                mock.patch.object(kd, 'wiki_api', return_value={'query': {'search': [], 'pages': []}}), \
+                mock.patch.object(kd.time, 'sleep', lambda s: None):
+            kd.prepare_one(self.topic, cfg, ai)
+        self.assertEqual(ai.calls[:4], ['seed', 'extract', 'audit_facts', 'write'])
+        self.assertNotIn(True, ai.search_flags)
+        self.assertTrue((kd.QUEUE / 't_demo.json').exists())
+
+    def test_config_defaults_to_no_search_grounding(self):
+        self.assertIs(CFG['search_grounding'], False)
 
     def test_audit_failure_triggers_one_rewrite_then_passes(self):
         ai = FakeAI(article_audit=[{'pass': False, 'issues': ['第1章に根拠のない主張']}, {'pass': True, 'issues': []}])
