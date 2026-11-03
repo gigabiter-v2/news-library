@@ -5,11 +5,13 @@ site_base_url: "https://gigabiter-v2.github.io/news-library"
 
 # --- Gemini ---------------------------------------------------------------
 # 執筆・事実抽出役。混雑/割当超過のとき fallback_models を順に試す。
+# 無料枠のAPIキーは「1モデルあたり1日20リクエスト」まで（太平洋時間0時=日本時間17時にリセット）。
+# 1冊で約5〜7回呼ぶため、予備モデルを多めに並べて1日分の余裕を確保する。
 model: "gemini-3.8-flash"
-fallback_models: ["gemini-3.6-flash"]
+fallback_models: ["gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash"]
 # 事実監査・原稿校閲役は、執筆役とは別モデルを先に使う（同じ癖での見落としを減らす）。
 audit_model: "gemini-3.6-flash"
-audit_fallback_models: ["gemini-3.8-flash"]
+audit_fallback_models: ["gemini-3.7-flash", "gemini-3.5-flash", "gemini-3.8-flash"]
 gemini_interval_seconds: 6      # 呼び出し間隔（分間上限対策）
 # 資料探しの方式。false=Wikipedia記事とその参考文献リンクから探す（無料枠のAPIキーで動く）。
 # true=Google検索グラウンディングで探す（課金設定済みのキーが必要。無料枠では全呼び出しが429になる）。
