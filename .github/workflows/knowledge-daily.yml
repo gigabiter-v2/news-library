@@ -21,6 +21,10 @@ on:
         description: "調査後に今日の1冊を出版する"
         type: boolean
         default: true
+      selftest:
+        description: "監査役が偽の事実を見逃さないかを実APIで確かめる(only の先頭の題材、API1回)"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -69,6 +73,13 @@ jobs:
       - name: Publish today's book
         if: ${{ github.event_name != 'workflow_dispatch' || inputs.publish }}
         run: python scripts/knowledge_daily.py publish
+
+      - name: Audit self-test (negative control)
+        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.selftest }}
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          ONLY: ${{ inputs.only }}
+        run: python scripts/knowledge_daily.py selftest --topic "${ONLY%%,*}"
 
       - name: Commit and push
         if: ${{ always() }}
