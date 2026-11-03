@@ -55,7 +55,10 @@ WIKI_API = 'https://ja.wikipedia.org/w/api.php'
 SKIP_DOMAINS = {
     'wikipedia.org', 'wikimedia.org', 'wikidata.org', 'archive.org', 'archive.today', 'archive.ph', 'archive.is',
     'google.com', 'google.co.jp', 'youtube.com', 'youtu.be', 'twitter.com', 'x.com', 'facebook.com', 'instagram.com',
-    'amazon.co.jp', 'amazon.com', 'rakuten.co.jp', 'doi.org', 'worldcat.org', 'ndl.go.jp', 'cir.nii.ac.jp',
+    'amazon.co.jp', 'amazon.com', 'rakuten.co.jp', 'doi.org', 'worldcat.org', 'ndl.go.jp', 'cir.nii.ac.jp', 'ci.nii.ac.jp',
+    # 図書館の典拠・目録レコード（Wikipediaの「典拠管理」欄）。本文がほぼ無く出典にならない。
+    'dnb.de', 'd-nb.info', 'bnf.fr', 'loc.gov', 'viaf.org', 'isni.org', 'nla.gov.au', 'archives.gov',
+    'openlibrary.org', 'goodreads.com', 'imdb.com',
 }
 CHARS_PER_MINUTE = 500  # 日本語電子書籍の読書速度の目安（所要時間表示用）
 ALLOWED_MIMES = ('text/html', 'text/plain', 'application/xhtml+xml', 'application/pdf')
@@ -231,7 +234,8 @@ class Gemini:
                         wait = int(retry_after) if retry_after.isdigit() else (suggested + 1 if suggested else 8 * (attempt + 1))
                         time.sleep(min(wait, 65))
                         continue
-                    self.blocked_until[model] = time.time() + 120
+                    # 過負荷(5xx)は短時間では回復しないので長めに避ける。
+                    self.blocked_until[model] = time.time() + (600 if r.status_code >= 500 else 120)
                     break
                 if r.status_code >= 400:
                     errors.append(f'{model}: HTTP {r.status_code}')
@@ -491,7 +495,8 @@ def wikipedia_candidates(topic, ai, per_page=8, max_external=18):
     return wiki[:1] + external[:max_external] + candidates + wiki[1:]
 
 
-def gather_sources(topic, ai, max_sources=5, min_sources=2, per_domain=2, budget_seconds=240, use_search=True):
+def gather_sources(topic, ai, max_sources=5, min_sources=2, per_domain=2, budget_seconds=240, use_search=True,
+                   min_chars=0):
     """実在ページを取得し、取得に成功したページ本文だけを資料にする。"""
     candidates = grounded_candidates(topic, ai) if use_search else wikipedia_candidates(topic, ai)
     if use_search:
@@ -506,6 +511,9 @@ def gather_sources(topic, ai, max_sources=5, min_sources=2, per_domain=2, budget
         try:
             page = fetch_public(url)
             key = source_domain_key(page['domain'])
+            if len(page['text']) < min_chars:
+                log(f'資料を除外[{via}]: {page["domain"]} / 本文が短い({len(page["text"])}字)')
+                continue
             if page['url'] in finals or domains.get(key, 0) >= per_domain:
                 continue
             finals.add(page['url'])
@@ -778,7 +786,8 @@ def prepare_one(topic, cfg, ai, auditor=None):
     auditor = auditor or ai
     log(f'調査開始: {topic["title"]}')
     sources = gather_sources(topic, ai, min_sources=int(cfg.get('source_min', 2)),
-                             use_search=bool(cfg.get('search_grounding', False)))
+                             use_search=bool(cfg.get('search_grounding', False)),
+                             min_chars=int(cfg.get('source_min_chars', 800)))
     facts = extract_facts(topic, sources, ai, int(cfg['fact_min']))
     facts = audit_facts(facts, sources, auditor, int(cfg['fact_min']))
     article = write_article(topic, sources, facts, ai, cfg)
