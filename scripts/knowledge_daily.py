@@ -522,7 +522,7 @@ def gather_sources(topic, ai, max_sources=5, min_sources=2, per_domain=2, budget
             domains[key] = domains.get(key, 0) + 1
             page['id'] = f'S{len(sources) + 1}'
             sources.append(page)
-            log(f'資料取得[{via}]: {page["domain"]} ({len(page["text"])}字)')
+            log(f'資料取得[{via}]: {page["domain"]} ({len(page["text"])}字) {str(page.get("title", ""))[:40]} {page["url"][:100]}')
             if len(sources) >= max_sources:
                 break
         except Exception as exc:
@@ -597,6 +597,7 @@ def extract_facts(topic, sources, ai, min_facts=6):
         '各claimは独立した日本語の事実(30〜160字)で、数字・年号は算用数字で資料の表記どおりに書く。'
         'evidence_excerptには必ず本文から「連続して一致する原文14〜100文字」を一字一句そのまま引用する'
         '(要約・言い換え・省略記号は禁止)。claimの数字・固有名詞は引用の中に含まれていること。'
+        'テーマに直接関係する事実だけを選び、別テーマの話や一般論は作らない。'
         '引用は校閲内部のみ。事実カードは15〜24個、できるだけ複数資料に分散する。'
         '複数の資料に不一致があれば、相違があることを示し断定しない。'
         'JSON: {"facts":[{"claim":"...","source_id":"S1","evidence_excerpt":"..."}, ...]}\n'
@@ -614,23 +615,44 @@ def extract_facts(topic, sources, ai, min_facts=6):
     raise ValueError(f'根拠付きの事実が不足: {len(facts)}件 / 独立資料{distinct_source_count(facts, sources) if facts else 0}件')
 
 
-def audit_facts(facts, sources, ai, min_facts=6):
+def context_window(text, excerpt, radius=220):
+    """引用箇所の前後の原文を返す。見つからなければ空文字。監査役が文脈を確認するために使う。"""
+    key = normalize(excerpt)
+    if not key:
+        return ''
+    index, chars = [], []
+    for i, ch in enumerate(str(text)):
+        for c in unicodedata.normalize('NFKC', ch):
+            if c.isspace() or c == '​':
+                continue
+            index.append(i)
+            chars.append(c.replace('“', '"').replace('”', '"'))
+    pos = ''.join(chars).find(key)
+    if pos < 0:
+        return ''
+    start, end = index[pos], index[pos + len(key) - 1] + 1
+    return str(text)[max(0, start - radius): end + radius]
+
+
+def audit_facts(facts, sources, ai, min_facts=6, report=None):
     """引用の存在だけでなく、引用が主張を支持するかを独立したAI呼出しで点検。
 
     この判定自体もAIなので真偽保証にはならない。支持されないカードは除外し、
-    残りが足りなければ出版しない。
+    残りが足りなければ出版しない。report(dict)を渡すと除外カードと理由を記録する。
     """
     source_map = {s['id']: s for s in sources}
     evidence = [
         {'id': f['id'], 'claim': f['claim'],
-         'excerpt': f['evidence_excerpt'], 'source_url': source_map[f['source_id']]['url']}
+         'excerpt': f['evidence_excerpt'],
+         'context': context_window(source_map[f['source_id']]['text'], f['evidence_excerpt']),
+         'source_url': source_map[f['source_id']]['url']}
         for f in facts
     ]
     prompt = (
-        '引用原文が主張を直接支持しているか厳しく検査する事実監査官。'
-        '引用に存在しない数字・年号・固有名詞・因果関係・心情・断定があれば、そのカードは不合格。'
+        '引用原文(excerpt)と、その前後の原文(context)が主張を直接支持しているか厳しく検査する事実監査官。'
+        'excerptとcontextのどちらにも書かれていない数字・年号・固有名詞・因果関係・心情・断定があれば、そのカードは不合格。'
         '単に出典内に原文が存在するだけでは合格にしない。'
-        'URLの内容はここで追加閲覧できないので、与えられた引用のみで判断。'
+        'URLの内容はここで追加閲覧できないので、与えられたexcerptとcontextのみで判断。'
         '全カード合格なら {"pass":true,"issues":[]}。不合格カードがあれば '
         '{"pass":false,"issues":["F1: 理由","F5: 理由"]} (カードID: 理由 の形式でJSONのみ)。\n'
         + json.dumps(evidence, ensure_ascii=False)
@@ -647,6 +669,12 @@ def audit_facts(facts, sources, ai, min_facts=6):
         raise ValueError('ファクト監査不合格(対象不明): ' + '; '.join(issues[:4]))
     kept = [f for f in facts if f['id'] not in flagged]
     log(f'ファクト監査で{len(flagged)}件除外: ' + '; '.join(issues[:6]))
+    for f in facts:
+        if f['id'] in flagged:
+            log(f'  除外カード {f["id"]}[{f["source_id"]}] {f["claim"][:90]} / 引用: {f["evidence_excerpt"][:50]}')
+    if report is not None:
+        report['audit_issues'] = issues
+        report['audit_removed'] = [f for f in facts if f['id'] in flagged]
     if len(kept) < min_facts or distinct_source_count(kept, sources) < 2:
         raise ValueError(f'ファクト監査後の事実が不足: {len(kept)}件')
     return kept
@@ -787,25 +815,42 @@ def prepare_one(topic, cfg, ai, auditor=None):
     """auditor(独立した校閲役のモデル)があれば、執筆役とは別モデルで監査する。"""
     auditor = auditor or ai
     log(f'調査開始: {topic["title"]}')
-    sources = gather_sources(topic, ai, min_sources=int(cfg.get('source_min', 2)),
-                             use_search=bool(cfg.get('search_grounding', False)),
-                             min_chars=int(cfg.get('source_min_chars', 800)))
-    facts = extract_facts(topic, sources, ai, int(cfg['fact_min']))
-    facts = audit_facts(facts, sources, auditor, int(cfg['fact_min']))
-    article = write_article(topic, sources, facts, ai, cfg)
-    for round_ in range(2):
+    # 失敗の原因調査用に、資料・事実カード・除外理由を data/knowledge/debug/ に残す（公開資料の抜粋のみ）。
+    dbg = {'topic': topic['id'], 'title': topic['title'], 'at': now().isoformat()}
+    try:
+        sources = gather_sources(topic, ai, min_sources=int(cfg.get('source_min', 2)),
+                                 use_search=bool(cfg.get('search_grounding', False)),
+                                 min_chars=int(cfg.get('source_min_chars', 800)))
+        dbg['sources'] = [{'id': s['id'], 'url': s['url'], 'title': str(s.get('title', ''))[:80],
+                           'chars': len(s['text']), 'head': s['text'][:160]} for s in sources]
+        facts = extract_facts(topic, sources, ai, int(cfg['fact_min']))
+        dbg['facts'] = facts
+        facts = audit_facts(facts, sources, auditor, int(cfg['fact_min']), report=dbg)
+        article = write_article(topic, sources, facts, ai, cfg)
+        for round_ in range(2):
+            try:
+                audit_article(article, facts, auditor)
+                break
+            except AuditFailure as exc:
+                log(f'校閲指摘({round_ + 1}回目): ' + '; '.join(exc.issues[:3]))
+                dbg.setdefault('article_issues', []).append(exc.issues[:6])
+                if round_ == 1:
+                    raise
+                article = write_article(topic, sources, facts, ai, cfg, feedback='\n'.join(exc.issues[:6]))
+    except Exception as exc:
+        dbg['error'] = f'{type(exc).__name__}: {exc}'[:500]
         try:
-            audit_article(article, facts, auditor)
-            break
-        except AuditFailure as exc:
-            log(f'校閲指摘({round_ + 1}回目): ' + '; '.join(exc.issues[:3]))
-            if round_ == 1:
-                raise
-            article = write_article(topic, sources, facts, ai, cfg, feedback='\n'.join(exc.issues[:6]))
+            save_json_atomic(DATA / 'debug' / (topic['id'] + '.json'), dbg)
+        except Exception as save_exc:
+            log(f'デバッグ記録の保存に失敗: {save_exc}')
+        raise
     slim_sources = [{k: x[k] for k in ('id', 'url', 'title', 'domain')} for x in sources]
+    overlap = sorted(set(ai.used_models) & set(auditor.used_models))
+    if overlap:
+        log('[注意] 執筆役と校閲役に同じモデルが使われました（独立性が下がります）: ' + ', '.join(overlap))
     obj = {'topic': topic, 'sources': slim_sources, 'facts': facts, 'article': article,
            'prepared_at': now().isoformat(),
-           'models': {'writer': ai.used_models, 'auditor': auditor.used_models}}
+           'models': {'writer': ai.used_models, 'auditor': auditor.used_models, 'shared': overlap}}
     save_json_atomic(QUEUE / (topic['id'] + '.json'), obj)
     log(f'校閲合格・入庫: {topic["id"]} ({text_size(article)}字、出典{len(slim_sources)}件)')
 
