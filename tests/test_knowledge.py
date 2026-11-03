@@ -556,6 +556,15 @@ class FactAuditTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.audit({'pass': False, 'issues': ['全体的に怪しい']})
 
+    def test_report_records_removed_cards_and_prompt_has_context(self):
+        ai = mock.Mock()
+        ai.ask.return_value = {'pass': False, 'issues': ['F2: 数字が違う', 'F5: 因果が飛躍']}
+        report = {}
+        kd.audit_facts(self.facts, self.sources, ai, 6, report=report)
+        self.assertEqual([f['id'] for f in report['audit_removed']], ['F2', 'F5'])
+        self.assertEqual(len(report['audit_issues']), 2)
+        self.assertIn('"context"', ai.ask.call_args[0][0])
+
     def test_extract_needs_enough_cards_and_two_domains(self):
         ai = FakeAI()
         ai.pages = {s['id']: s for s in self.sources}
@@ -564,6 +573,17 @@ class FactAuditTests(unittest.TestCase):
         ai.pages = {'S1': self.sources[0]}  # 片方の資料からしか抽出できない
         with self.assertRaises(ValueError):
             kd.extract_facts({'title': 't'}, self.sources, ai, 6)
+
+
+class ContextWindowTests(unittest.TestCase):
+    def test_returns_surrounding_original_text(self):
+        body = 'ＡＢＣの設立は1910年だった。'
+        text = 'あ' * 300 + body + 'い' * 300
+        ctx = kd.context_window(text, 'ABCの設立は1910年だった。', radius=50)
+        self.assertEqual(ctx, 'あ' * 50 + body + 'い' * 50)
+
+    def test_missing_excerpt_returns_empty(self):
+        self.assertEqual(kd.context_window('本文だけがある', '存在しない引用文です'), '')
 
 
 class ArticleValidationTests(unittest.TestCase):
@@ -664,6 +684,16 @@ class PipelineTests(TempEnv):
         ai = FakeAI(article_audit=[{'pass': False, 'issues': ['誤り']}])
         with self.assertRaises(kd.AuditFailure):
             self.run_prepare(ai)
+        self.assertFalse((kd.QUEUE / 't_demo.json').exists())
+
+    def test_failure_leaves_debug_record(self):
+        ai = FakeAI(fact_audit={'pass': False, 'issues': [f'F{i}: 根拠なし' for i in range(1, 12)]})
+        with self.assertRaises(ValueError):
+            self.run_prepare(ai)
+        dbg = json.loads((kd.DATA / 'debug' / 't_demo.json').read_text(encoding='utf-8'))
+        self.assertEqual(dbg['topic'], 't_demo')
+        self.assertIn('不足', dbg['error'])
+        self.assertTrue(dbg['sources'] and dbg['facts'] and dbg['audit_removed'])
         self.assertFalse((kd.QUEUE / 't_demo.json').exists())
 
     def test_uses_separate_auditor_object(self):
