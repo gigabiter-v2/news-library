@@ -870,6 +870,7 @@ def text_size(article):
 
 
 SUPPORT_MIN = 0.22  # 文の2文字連(bigram)のうち、引用した事実カードにも現れる割合の下限
+ENDING_SUPPORT_MIN = 0.30  # 結びの文の下限(冒頭の問いを回収する文は低めに出るので、本文より少し高い値で一般論だけを落とす)
 
 
 def _bigrams(text):
@@ -923,6 +924,16 @@ def trim_unsupported(article, facts, minimum=SUPPORT_MIN):
                 kept_paragraphs.append(para)
         chapter['paragraphs'] = kept_paragraphs
     article['chapters'] = [c for c in article['chapters'] if not isinstance(c, dict) or c.get('paragraphs')]
+    # 結びは、冒頭の問いの回収という性質上ゆるめの基準だが、事実カードにない一般論・提言(「～が不可欠である」等)は取り除く。
+    # 全文が基準を下回る場合は結びを空にしない(冒頭の問いを回収する文が残らなくなるため)。冒頭は問いの提示なので対象外。
+    ending = article.get('ending')
+    if isinstance(ending, dict) and isinstance(ending.get('text'), str):
+        grams = card_bigrams(ending.get('fact_ids'), fact_map)
+        sentences = split_sentences(ending['text'])
+        keep = [s for s in sentences if sentence_support(s, grams) >= ENDING_SUPPORT_MIN]
+        if keep and len(keep) < len(sentences):
+            removed += [s for s in sentences if s not in keep]
+            ending['text'] = ''.join(keep)
     return removed
 
 
@@ -990,6 +1001,8 @@ def write_article(topic, sources, facts, ai, cfg, feedback=None, _retry=True):
         'ファクトにない評価・因果・影響・意義・補足(「重要である」「示唆している」「側面がある」「欠かせない」「～を提供する」など)は'
         'factの段落に混ぜない。書きたい場合は、数字や固有名詞を含まない短いinterpretation段落に分け「～と考えられる」と明示する。'
         '「このように」「つまり」で始まる総括も、ファクトの繰り返しにとどめる。'
+        'ファクトの時制・範囲・断定の強さを変えない(「考えられている」を「普及した」に、「日本では」を一般論に、'
+        '「という考え方がある」を「存在した」に、「～とされる」を断定に言い換えない)。ファクトにない「現在の実務では」「一般に」も足さない。'
         '冒頭は問いの提示、結びは冒頭の問いの回収とファクトの要約だけにし、新しい主張を足さない。'
         'ファクトは全て使い、各ファクトの内容を省略せず丁寧に展開する。'
         '他人の文章を切り貼りしない。文章は独自に自然で読みやすく、冒頭の疑問を末尾で回収。'
@@ -1062,6 +1075,7 @@ def audit_article(article, facts, ai):
         '種別がinterpretationの段落は、事実カードにない数字・固有名詞・出来事を含まず、断定を避けているか確認する。'
         '種別がfactの段落は、事実カードの範囲だけで書かれているか文ごとに確認し、カードにない評価・因果・影響・意義・補足の文が1文でもあれば不合格にして、その文頭をissuesに書く。'
         '冒頭と結びも、カードにない新しい主張が入っていないか確認する。'
+        'カードの時制・適用範囲・断定の強さが変えられていないか(「考えられている」→「普及した」、地域限定→一般論、「ある」→「あった」、伝聞→断定)も確認し、変えられていれば不合格。'
         '読者が面白く読めても事実不足なら不合格。編集者に甘くしない。'
         '根拠カード自体の正確性を保証できるわけではない点も考慮。'
         '不合格の場合、issuesには問題の文章の冒頭と理由を具体的に書く。'
@@ -1476,6 +1490,18 @@ def lines(text, max_chars=17):
     return result
 
 
+def hero_label(heading, width=19):
+    """表紙図の題名ラベル。途中で切れたまま見せない(コロン前の主題を優先し、長ければ「…」で省略する)。"""
+    text = str(heading).strip()
+    if len(lines(text, width)) <= 1:
+        return text
+    head = re.split(r'[：:]', text, maxsplit=1)[0].strip()
+    if 4 <= len(head) and len(lines(head, width)) == 1:
+        return head
+    first = lines(text, width - 1)[0]
+    return first + '…'
+
+
 def draw_hero(category, heading):
     """実在人物/製品の形を捏造せず、テーマを象徴するオリジナル線画。"""
     img = Image.new('RGB', (448, 286), 'white')
@@ -1508,8 +1534,7 @@ def draw_hero(category, heading):
             d.rectangle((x, 188-h, x+34, 187), outline='black', width=4)
         d.line((130, 99, 169, 87, 225, 111, 301, 75), fill='black', width=3)
     d.line((30, 233, 418, 233), fill='black', width=2)
-    label = ' / '.join(lines(heading, 19)[:1])
-    d.text((32, 244), label, font=jp_font(17), fill='black')
+    d.text((32, 244), hero_label(heading), font=jp_font(17), fill='black')
     return img.convert('1', dither=Image.Dither.NONE)
 
 
