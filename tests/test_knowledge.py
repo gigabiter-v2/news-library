@@ -77,12 +77,12 @@ class FakeAI:
     """Gemini互換の模擬。プロンプトの用途で応答を切り替える。"""
     models = ['fake-model']
 
-    def __init__(self, sources_urls=None, article_ok=True, fact_audit=None, article_audit=None):
+    def __init__(self, sources_urls=None, article_ok=True, fact_status=None, article_audit=None):
         self.used_models = ['fake-model']
         self.last_grounding = []
         self.last_queries = ['q']
         self.sources_urls = sources_urls or ['https://a.example.co.jp/p', 'https://b.example.org/p']
-        self.fact_audit = fact_audit or {'pass': True, 'issues': []}
+        self.fact_status = fact_status or {}  # カードID -> 'insufficient' / 'contradicted'（指定が無ければ裏付けあり）
         self.article_audits = list(article_audit or [{'pass': True, 'issues': []}])
         self.calls = []
         self.pages = {}
@@ -104,7 +104,8 @@ class FakeAI:
             return {'facts': rows}
         if '事実監査官' in prompt:
             self.calls.append('audit_facts')
-            return self.fact_audit
+            ids = list(dict.fromkeys(re.findall(r'"id": "(F\d+)"', prompt)))
+            return {'verdicts': [{'id': i, 'status': self.fact_status.get(i, 'supported'), 'reason': 'テスト'} for i in ids]}
         if '校閲責任者' in prompt:
             self.calls.append('audit_article')
             return self.article_audits.pop(0) if len(self.article_audits) > 1 else self.article_audits[0]
@@ -128,7 +129,8 @@ def make_article(ids):
     }
 
 
-TEST_CFG = dict(CFG, article_min_chars=100, article_max_chars=9000, fact_min=6, search_grounding=True, source_min_chars=0)
+TEST_CFG = dict(CFG, article_min_chars=100, article_max_chars=9000, fact_min=6, search_grounding=True, source_min_chars=0,
+                source_trusted_min=0)
 
 
 class TempEnv(unittest.TestCase):
@@ -169,6 +171,18 @@ class ConfigTests(unittest.TestCase):
             self.assertIn(t['kind'], ('story', 'explanation'))
         for cat in CFG['weekday_categories']:
             self.assertGreaterEqual(sum(t['category'] == cat for t in CFG['topics']), 5, cat)
+
+    def test_news_quota_pool_is_not_used_by_the_library(self):
+        chain = [CFG['model'], CFG['audit_model']] + list(CFG['fallback_models']) + list(CFG['audit_fallback_models'])
+        self.assertNotIn('gemini-3.6-flash', chain)
+        self.assertNotIn('gemini-3.5-flash', chain)  # 3.6-flash に自動転送され、ニュース配信と同じ無料枠を使う
+        self.assertNotEqual(CFG['model'], CFG['audit_model'])
+
+    def test_official_domains_refer_to_real_topics_and_trusted_source_is_required(self):
+        ids = {t['id'] for t in CFG['topics']}
+        self.assertTrue(set(CFG['official_domains']) <= ids)
+        self.assertGreaterEqual(int(CFG['source_trusted_min']), 1)
+        self.assertEqual(kd.source_tier('www.fujifilm.com', CFG['official_domains']['case_fujifilm']), 0)
 
     def test_news_files_are_not_targets(self):
         self.assertEqual(kd.FEED.name, 'knowledge_feed.xml')
@@ -521,7 +535,7 @@ class WikiCandidateTests(TempEnv):
         rows = [(u, u.split('/')[2], 'wiki') for u in pages]
         with mock.patch.object(kd, 'wikipedia_candidates', return_value=rows), mock.patch.object(kd, 'fetch_public', side_effect=fetch):
             sources = kd.gather_sources({'title': 't'}, ai, use_search=False)
-        self.assertEqual([s['domain'] for s in sources], ['ja.wikipedia.org', 'ja.wikipedia.org', 'b.example.org'])
+        self.assertEqual([s['domain'] for s in sources], ['b.example.org', 'ja.wikipedia.org', 'ja.wikipedia.org'])  # Wikipediaは後回し
         with mock.patch.object(kd, 'wikipedia_candidates', return_value=rows[:2]), mock.patch.object(kd, 'fetch_public', side_effect=fetch):
             with self.assertRaises(ValueError):
                 kd.gather_sources({'title': 't'}, ai, use_search=False)
@@ -536,34 +550,63 @@ class FactAuditTests(unittest.TestCase):
         self.facts = [{'id': f'F{i + 1}', 'claim': s[i], 'source_id': 'S1' if i % 2 else 'S2',
                        'evidence_excerpt': s[i]} for i in range(10)]
 
-    def audit(self, verdict, min_facts=6):
+    def verdict(self, bad=None):
+        bad = bad or {}
+        return {'verdicts': [{'id': f['id'], 'status': bad.get(f['id'], 'supported'), 'reason': 'テスト'} for f in self.facts]}
+
+    def audit(self, verdict, min_facts=6, report=None):
         ai = mock.Mock()
         ai.ask.return_value = verdict
-        return kd.audit_facts(self.facts, self.sources, ai, min_facts)
+        return kd.audit_facts(self.facts, self.sources, ai, min_facts, report=report)
 
     def test_all_pass(self):
-        self.assertEqual(len(self.audit({'pass': True, 'issues': []})), 10)
+        self.assertEqual(len(self.audit(self.verdict())), 10)
 
-    def test_flagged_cards_are_dropped(self):
-        kept = self.audit({'pass': False, 'issues': ['F2: 数字が違う', 'F5: 因果が飛躍']})
+    def test_insufficient_and_contradicted_cards_are_dropped(self):
+        kept = self.audit(self.verdict({'F2': 'insufficient', 'F5': 'contradicted'}))
         self.assertEqual([f['id'] for f in kept], ['F1', 'F3', 'F4', 'F6', 'F7', 'F8', 'F9', 'F10'])
 
     def test_too_many_flagged_fails(self):
         with self.assertRaises(ValueError):
-            self.audit({'pass': False, 'issues': [f'F{i}: x' for i in range(1, 7)]})
+            self.audit(self.verdict({f'F{i}': 'insufficient' for i in range(1, 7)}))
 
-    def test_unidentified_failure_fails(self):
+    def test_old_pass_format_is_not_accepted(self):
+        """{"pass":true}のような旧形式を全件合格とみなしてはならない。"""
         with self.assertRaises(ValueError):
-            self.audit({'pass': False, 'issues': ['全体的に怪しい']})
+            self.audit({'pass': True, 'issues': []})
 
-    def test_report_records_removed_cards_and_prompt_has_context(self):
+    def test_missing_or_unknown_verdict_is_not_supported(self):
+        v = self.verdict()
+        v['verdicts'] = [r for r in v['verdicts'] if r['id'] != 'F3']
+        v['verdicts'][0]['status'] = 'ok'  # 未知の区分
+        kept = self.audit(v)
+        self.assertNotIn('F1', [f['id'] for f in kept])
+        self.assertNotIn('F3', [f['id'] for f in kept])
+        self.assertEqual(len(kept), 8)
+
+    def test_report_records_verdicts_and_prompt_has_context_and_other_sources(self):
         ai = mock.Mock()
-        ai.ask.return_value = {'pass': False, 'issues': ['F2: 数字が違う', 'F5: 因果が飛躍']}
+        ai.ask.return_value = self.verdict({'F2': 'insufficient', 'F5': 'contradicted'})
         report = {}
         kd.audit_facts(self.facts, self.sources, ai, 6, report=report)
-        self.assertEqual([f['id'] for f in report['audit_removed']], ['F2', 'F5'])
-        self.assertEqual(len(report['audit_issues']), 2)
-        self.assertIn('"context"', ai.ask.call_args[0][0])
+        self.assertEqual([r['id'] for r in report['audit_removed']], ['F2', 'F5'])
+        self.assertEqual(report['audit_counts'], {'supported': 8, 'insufficient': 1, 'contradicted': 1})
+        prompt = ai.ask.call_args[0][0]
+        self.assertIn('"context"', prompt)
+        self.assertIn('"other_sources"', prompt)
+
+    def test_corroboration_is_recorded_only_with_matching_numbers(self):
+        a = {'id': 'S1', 'url': 'https://a.example.co.jp/p', 'domain': 'a.example.co.jp', 'title': 'A',
+             'text': '同社は1910年に創業した。本社は東京にあり、従業員は多い。'}
+        b = {'id': 'S2', 'url': 'https://b.example.org/p', 'domain': 'b.example.org', 'title': 'B',
+             'text': '同社は1910年に創業した。別の記述として1925年に工場を拡張した。'}
+        facts = [{'id': 'F1', 'claim': '同社は1910年に創業した。', 'source_id': 'S1', 'evidence_excerpt': '同社は1910年に創業した。'},
+                 {'id': 'F2', 'claim': '別の記述として1925年に工場を拡張した。', 'source_id': 'S2', 'evidence_excerpt': '別の記述として1925年に工場を拡張した。'}]
+        ai = mock.Mock()
+        ai.ask.return_value = {'verdicts': [{'id': 'F1', 'status': 'supported', 'reason': ''}, {'id': 'F2', 'status': 'supported', 'reason': ''}]}
+        kept = kd.audit_facts(facts, [a, b], ai, 1)
+        self.assertEqual(kept[0]['corroborated_by'], ['S2'])
+        self.assertEqual(kept[1]['corroborated_by'], [])
 
     def test_extract_needs_enough_cards_and_two_domains(self):
         ai = FakeAI()
@@ -687,7 +730,7 @@ class PipelineTests(TempEnv):
         self.assertFalse((kd.QUEUE / 't_demo.json').exists())
 
     def test_failure_leaves_debug_record(self):
-        ai = FakeAI(fact_audit={'pass': False, 'issues': [f'F{i}: 根拠なし' for i in range(1, 12)]})
+        ai = FakeAI(fact_status={f'F{i}': 'insufficient' for i in range(1, 12)})
         with self.assertRaises(ValueError):
             self.run_prepare(ai)
         dbg = json.loads((kd.DATA / 'debug' / 't_demo.json').read_text(encoding='utf-8'))
@@ -726,6 +769,108 @@ class PipelineTests(TempEnv):
                 kd.prepare(CFG, 1, 3)
             self.assertTrue(tried)
             self.assertFalse(set(tried) & set(failed))
+
+
+class RelevanceTests(TempEnv):
+    """主題語による資料の絞り込みと、Wikipedia記事の並べ替え(損益分岐点の回で別テーマの資料が混ざった不具合の再発防止)。"""
+
+    def test_mentions_topic_by_title_or_repetition(self):
+        kws = ['損益分岐点']
+        self.assertTrue(kd.mentions_topic('固定費の話。' * 5, '損益分岐点とは', kws))
+        self.assertTrue(kd.mentions_topic('損益分岐点を求める。損益分岐点は売上と費用が等しい点。', '会計', kws))
+        self.assertFalse(kd.mentions_topic('消費の話。' * 50 + '損益分岐点は一度だけ。', '消費', kws))
+        self.assertTrue(kd.mentions_topic('何でも', '何でも', []))  # 主題語が無ければ絞り込まない
+
+    def test_gather_drops_off_topic_pages_and_needs_enough_on_topic_ones(self):
+        on = lambda u: dict(fake_source('x', u.split('/')[2]), url=u, title='損益分岐点', text=fake_source('x', 'q')['text'] + '損益分岐点。' * 3)
+        off = lambda u: dict(fake_source('x', u.split('/')[2]), url=u, title='消費')
+        urls = ['https://a.example.co.jp/1', 'https://b.example.org/2', 'https://c.example.net/3']
+        pages = {urls[0]: on(urls[0]), urls[1]: off(urls[1]), urls[2]: on(urls[2])}
+        rows = [(u, u.split('/')[2], 'listed') for u in urls]
+        topic = {'title': '損益分岐点とは', 'keywords': ['損益分岐点']}
+        with mock.patch.object(kd, 'wikipedia_candidates', return_value=rows), \
+                mock.patch.object(kd, 'fetch_public', side_effect=lambda u: dict(pages[u])):
+            sources = kd.gather_sources(topic, FakeAI(), use_search=False)
+        self.assertEqual(sorted(s['domain'] for s in sources), ['a.example.co.jp', 'c.example.net'])
+        pages[urls[2]] = off(urls[2])
+        with mock.patch.object(kd, 'wikipedia_candidates', return_value=rows), \
+                mock.patch.object(kd, 'fetch_public', side_effect=lambda u: dict(pages[u])):
+            with self.assertRaises(ValueError):  # 主題に合う独立した資料が1つだけ
+                kd.gather_sources(topic, FakeAI(), use_search=False)
+
+    def test_wikipedia_pages_follow_keyword_title_then_model_order_and_keywords_are_returned(self):
+        ai = FakeAI(sources_urls=[])
+        ai.ask = lambda *a, **k: {'keywords': ['損益分岐点', 'X'], 'queries': [], 'titles': ['固定費', '損益分岐点', '消費'], 'urls': []}
+
+        def api(params):
+            if params.get('list') == 'search':
+                return {'query': {'search': []}}
+            return {'query': {'pages': [
+                {'title': '消費', 'extlinks': [{'url': 'https://off.example.com/x'}]},
+                {'title': '損益分岐点', 'extlinks': [{'url': 'https://on.example.com/x'}]},
+                {'title': '固定費', 'extlinks': [{'url': 'https://mid.example.com/x'}]}]}}
+        found = {}
+        with mock.patch.object(kd, 'wiki_api', side_effect=api), mock.patch.object(kd.time, 'sleep', lambda s: None):
+            rows = kd.wikipedia_candidates({'title': '損益分岐点とは'}, ai, found=found)
+        urls = [r[0] for r in rows]
+        self.assertEqual(found['keywords'], ['損益分岐点'])  # 2文字未満の語は捨てる
+        self.assertLess(urls.index('https://on.example.com/x'), urls.index('https://mid.example.com/x'))
+        self.assertLess(urls.index('https://mid.example.com/x'), urls.index('https://off.example.com/x'))
+
+    def test_fact_audit_prompt_names_the_topic_and_off_topic_rule(self):
+        s = sentences(12)
+        facts = [{'id': f'F{i + 1}', 'claim': s[i], 'source_id': 'S1' if i % 2 else 'S2', 'evidence_excerpt': s[i]} for i in range(10)]
+        ai = mock.Mock()
+        ai.ask.return_value = {'verdicts': [{'id': f['id'], 'status': 'supported', 'reason': 'x'} for f in facts]}
+        sources = [fake_source('S1', 'a.example.co.jp'), fake_source('S2', 'b.example.org', year0=1930)]
+        kd.audit_facts(facts, sources, ai, 6, topic={'title': '損益分岐点とは何か'})
+        prompt = ai.ask.call_args[0][0]
+        self.assertIn('損益分岐点とは何か', prompt)
+        self.assertIn('テーマ無関係', prompt)
+
+
+class ArticleRetryTests(TempEnv):
+    def setUp(self):
+        super().setUp()
+        s = sentences(10)
+        self.facts = [{'id': f'F{i + 1}', 'claim': s[i], 'source_id': 'S1', 'evidence_excerpt': s[i]} for i in range(10)]
+        self.ids = [f['id'] for f in self.facts]
+        self.topic = {'id': 't', 'title': 'テーマ', 'kind': 'explanation'}
+        self.cfg = dict(TEST_CFG, article_min_chars=500)
+
+    def scripted(self, replies):
+        ai = mock.Mock()
+        ai.ask.side_effect = list(replies)
+        return ai
+
+    def short_article(self):
+        a = make_article(self.ids)
+        for c in a['chapters']:
+            for p in c['paragraphs']:
+                p['text'] = '短い。'
+        a['hook']['text'] = a['ending']['text'] = '短い。'
+        return a
+
+    def test_short_article_gets_exactly_one_rewrite_with_the_reason(self):
+        good = make_article(self.ids)
+        ai = self.scripted([self.short_article(), good])
+        out = kd.write_article(self.topic, [], self.facts, ai, self.cfg)
+        self.assertIs(out, good)
+        self.assertEqual(ai.ask.call_count, 2)
+        retry_prompt = ai.ask.call_args_list[1][0][0]
+        self.assertIn('本文文字数が基準外', retry_prompt)
+        self.assertIn('分量を満たす', retry_prompt)
+
+    def test_second_failure_is_raised_not_retried_again(self):
+        ai = self.scripted([self.short_article(), self.short_article(), make_article(self.ids)])
+        with self.assertRaises(ValueError):
+            kd.write_article(self.topic, [], self.facts, ai, self.cfg)
+        self.assertEqual(ai.ask.call_count, 2)
+
+    def test_valid_first_draft_is_not_rewritten(self):
+        ai = self.scripted([make_article(self.ids)])
+        kd.write_article(self.topic, [], self.facts, ai, self.cfg)
+        self.assertEqual(ai.ask.call_count, 1)
 
 
 class EpubTests(TempEnv):
