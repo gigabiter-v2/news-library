@@ -11,6 +11,9 @@ fallback_models: ["gemini-3.6-flash"]
 audit_model: "gemini-3.6-flash"
 audit_fallback_models: ["gemini-3.8-flash"]
 gemini_interval_seconds: 6      # 呼び出し間隔（分間上限対策）
+# 資料探しの方式。false=Wikipedia記事とその参考文献リンクから探す（無料枠のAPIキーで動く）。
+# true=Google検索グラウンディングで探す（課金設定済みのキーが必要。無料枠では全呼び出しが429になる）。
+search_grounding: false
 max_output_tokens: 32768        # 思考トークンを含む出力上限
 
 # --- 出版ルール -------------------------------------------------------------
