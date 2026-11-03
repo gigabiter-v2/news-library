@@ -544,9 +544,11 @@ def wikipedia_candidates(topic, ai, per_page=8, max_external=18, found=None):
             candidates.append((url, (urlparse(url).hostname or '').lower(), 'listed'))
     wiki = [('https://ja.wikipedia.org/wiki/' + url_quote(str(p['title']).replace(' ', '_'), safe=''), 'ja.wikipedia.org', 'wiki')
             for p in pages]
-    log(f'Wikipedia記事{len(pages)}件 / 参考文献リンク{len(external)}件 / モデル記載URL{len(listed)}件')
-    # 最初の記事を本文の土台に、続いて参考文献先(一次・公式資料)、残りの記事の順に試す。
-    return wiki[:1] + external[:max_external] + candidates + wiki[1:]
+    # 事典(コトバンク)の見出しを主題語で直接引く。Wikipediaに頼らない独立した資料になる。無い語は取得時に除外される。
+    dictionary = [('https://kotobank.jp/word/' + url_quote(k, safe=''), 'kotobank.jp', 'dict') for k in keywords[:2]]
+    log(f'Wikipedia記事{len(pages)}件 / 参考文献リンク{len(external)}件 / モデル記載URL{len(listed)}件 / 事典見出し{len(dictionary)}件')
+    # 事典→最初のWikipedia記事を本文の土台に、続いて参考文献先(一次・公式資料)、残りの記事の順に試す。
+    return dictionary + wiki[:1] + external[:max_external] + candidates + wiki[1:]
 
 
 def gather_sources(topic, ai, max_sources=5, min_sources=2, per_domain=2, budget_seconds=240, use_search=True,
@@ -692,7 +694,8 @@ def extract_facts(topic, sources, ai, min_facts=6):
         'evidence_excerptには必ず本文から「連続して一致する原文14〜100文字」を一字一句そのまま引用する'
         '(要約・言い換え・省略記号は禁止)。claimの数字・固有名詞は引用の中に含まれていること。'
         'テーマに直接関係する事実だけを選び、別テーマの話や一般論は作らない。'
-        '引用は校閲内部のみ。事実カードは15〜24個、できるだけ複数資料に分散する。'
+        '引用は校閲内部のみ。事実カードは20〜32個。資料にある定義・式・区分・数値・経緯・具体例を漏れなく拾い、'
+        '1つのclaimに複数の話を詰め込まず独立した事実に分け、できるだけ複数資料に分散する。'
         '複数の資料に不一致があれば、相違があることを示し断定しない。'
         'JSON: {"facts":[{"claim":"...","source_id":"S1","evidence_excerpt":"..."}, ...]}\n'
         f'テーマ:{topic["title"]}\n資料:\n{docs}'
@@ -866,6 +869,63 @@ def text_size(article):
     return len(''.join(blocks))
 
 
+SUPPORT_MIN = 0.22  # 文の2文字連(bigram)のうち、引用した事実カードにも現れる割合の下限
+
+
+def _bigrams(text):
+    s = re.sub(r'[\s、。，．・「」『』()\[\]{}:;"\'“”‘’!?]', '', unicodedata.normalize('NFKC', str(text)))
+    return {s[i:i + 2] for i in range(len(s) - 1)}
+
+
+def split_sentences(text):
+    return [s for s in re.split(r'(?<=[。！？])', str(text)) if s.strip()]
+
+
+def card_bigrams(fact_ids, fact_map):
+    grams = set()
+    for fid in fact_ids or []:
+        f = fact_map.get(fid)
+        if f:
+            grams |= _bigrams(f.get('claim', '') + ' ' + f.get('evidence_excerpt', ''))
+    return grams
+
+
+def sentence_support(sentence, evidence_grams):
+    """文の表現がどれだけ事実カード(主張+原文引用)に由来するか(0〜1)。言い換えは高く、新しい補足・評価は低くなる。"""
+    grams = _bigrams(sentence)
+    return 1.0 if not grams else len(grams & evidence_grams) / len(grams)
+
+
+def trim_unsupported(article, facts, minimum=SUPPORT_MIN):
+    """kind=fact の本文段落から、引用した事実カードにほとんど根拠表現のない文(評価・因果・補足など)を取り除く。
+
+    AIの校閲は表現の言い換えと補足を見分け損ねることがあるため、機械的な下限を設ける。
+    取り除いた文を返す。interpretation段落・冒頭・結び・学び・用語は対象外(AI校閲に任せる)。
+    """
+    removed = []
+    if not isinstance(article, dict) or not isinstance(article.get('chapters'), list):
+        return removed
+    fact_map = {f['id']: f for f in facts}
+    for chapter in article['chapters']:
+        if not isinstance(chapter, dict) or not isinstance(chapter.get('paragraphs'), list):
+            continue
+        kept_paragraphs = []
+        for para in chapter['paragraphs']:
+            if not isinstance(para, dict) or para.get('kind', 'fact') != 'fact' or not isinstance(para.get('text'), str):
+                kept_paragraphs.append(para)
+                continue
+            grams = card_bigrams(para.get('fact_ids'), fact_map)
+            keep = []
+            for sentence in split_sentences(para['text']):
+                (keep if sentence_support(sentence, grams) >= minimum else removed).append(sentence)
+            if keep:
+                para['text'] = ''.join(keep)
+                kept_paragraphs.append(para)
+        chapter['paragraphs'] = kept_paragraphs
+    article['chapters'] = [c for c in article['chapters'] if not isinstance(c, dict) or c.get('paragraphs')]
+    return removed
+
+
 def validate_article(article, facts, cfg, demo=False):
     if not isinstance(article, dict) or len(str(article.get('title', ''))) < 6:
         raise ValueError('書名が不正')
@@ -915,7 +975,7 @@ def write_article(topic, sources, facts, ai, cfg, feedback=None, _retry=True):
     goal = {'story': '実在の事件・企業史の流れを通して、転機と理由を面白く読ませる',
             'explanation': '中材の業務運営・受託経営・ビジネスの仕組みを分かりやすく解説'}[topic['kind']]
     lo, hi = int(cfg['article_min_chars']), int(cfg['article_max_chars'])
-    base = lo + (1000 if topic['kind'] == 'story' else 500)  # 下限ぎりぎりで不合格にならないよう、目標は下限より上に置く
+    base = lo + (1000 if topic['kind'] == 'story' else 700)  # 下限ぎりぎりで不合格にならないよう、目標は下限より上に置く(補足文の機械削除ぶんも見込む)
     size = f'{base}〜{min(hi - 500, base + (2500 if topic["kind"] == "story" else 1500))}字を目標に(最低でも{lo}字)'
     domain_hint = ('看護師向けの基本的な医学知識は不要。中材では病院側と受託会社側の仕事・経営に注目。'
                    if topic.get('category') in ('hospital', 'outsourcing') else
@@ -926,6 +986,12 @@ def write_article(topic, sources, facts, ai, cfg, feedback=None, _retry=True):
         '資料の事実と、AIの解釈・考察を厳密に区別する。事実を述べる段落はkindを"fact"、'
         '解釈や一般的な考察の段落はkindを"interpretation"とし、後者は「～と考えられる」等と明示して、'
         '新しい数字・固有名詞・出来事を含めない。interpretationは全体の2割以下にする。'
+        'kindが"fact"の段落の各文は、根拠に挙げたファクトに書かれた内容を言い換えて述べるだけにする。'
+        'ファクトにない評価・因果・影響・意義・補足(「重要である」「示唆している」「側面がある」「欠かせない」「～を提供する」など)は'
+        'factの段落に混ぜない。書きたい場合は、数字や固有名詞を含まない短いinterpretation段落に分け「～と考えられる」と明示する。'
+        '「このように」「つまり」で始まる総括も、ファクトの繰り返しにとどめる。'
+        '冒頭は問いの提示、結びは冒頭の問いの回収とファクトの要約だけにし、新しい主張を足さない。'
+        'ファクトは全て使い、各ファクトの内容を省略せず丁寧に展開する。'
         '他人の文章を切り貼りしない。文章は独自に自然で読みやすく、冒頭の疑問を末尾で回収。'
         '数字・年号はファクトに書かれたものだけを算用数字で使い、ファクトにない数字は書かない。'
         + domain_hint +
@@ -947,6 +1013,12 @@ def write_article(topic, sources, facts, ai, cfg, feedback=None, _retry=True):
     if feedback:
         prompt += '\n\n前回の原稿は次の理由で不合格だった。該当箇所をファクトの範囲に直して全体を書き直すこと:\n' + feedback
     article = ai.ask(prompt)
+    # 事実カードに根拠表現のない文(評価・因果・補足)を機械的に取り除く。AIの校閲に頼らない下限。
+    removed = trim_unsupported(article, facts)
+    if removed:
+        log(f'事実カードに根拠表現のない文を{len(removed)}文、本文から機械的に削除しました')
+        for sentence in removed[:12]:
+            log('  削除: ' + sentence[:70])
     try:
         validate_article(article, facts, cfg)
     except ValueError as exc:
@@ -957,8 +1029,14 @@ def write_article(topic, sources, facts, ai, cfg, feedback=None, _retry=True):
         log(f'原稿の検証に不合格のため1回だけ書き直します: {exc}')
         hint = ('事実カードを漏れなく使い、各章を丁寧に展開して分量を満たすこと(事実カードにない内容は足さない)。'
                 if '文字数' in str(exc) or '根拠カード' in str(exc) else '')
+        if removed:
+            hint += ('前回は事実カードにない補足・評価の文を機械的に削除した。削除後の分量が足りなかったので、'
+                     '補足で埋めず、事実カードの内容を漏れなく言い換えて展開すること。'
+                     '例: ' + ' / '.join(s[:40] for s in removed[:3]))
         note = f'検証で不合格: {exc}。{hint}'
         return write_article(topic, sources, facts, ai, cfg, feedback=(feedback + '\n' if feedback else '') + note, _retry=False)
+    if removed:
+        article['trimmed_sentences'] = removed[:30]  # 出典照合のため、削除した文を原稿JSONに残す
     return article
 
 
@@ -982,7 +1060,8 @@ def audit_article(article, facts, ai):
         '根拠にない企業実例、専門知識の誤用が1つでもあればpassをfalse。'
         '学習ポイントと用語解説にも根拠のない具体的主張がないか判定。'
         '種別がinterpretationの段落は、事実カードにない数字・固有名詞・出来事を含まず、断定を避けているか確認する。'
-        '種別がfactの段落は、事実カードの範囲だけで書かれているか確認する。'
+        '種別がfactの段落は、事実カードの範囲だけで書かれているか文ごとに確認し、カードにない評価・因果・影響・意義・補足の文が1文でもあれば不合格にして、その文頭をissuesに書く。'
+        '冒頭と結びも、カードにない新しい主張が入っていないか確認する。'
         '読者が面白く読めても事実不足なら不合格。編集者に甘くしない。'
         '根拠カード自体の正確性を保証できるわけではない点も考慮。'
         '不合格の場合、issuesには問題の文章の冒頭と理由を具体的に書く。'
@@ -1686,6 +1765,13 @@ def publish(cfg, date=None):
     items.sort(key=lambda pair: (pair[1].get('topic', {}).get('category') != target_cat,
                                  pair[1].get('prepared_at', '')))
     selected_file, item = items[0]
+    # 出版前の最終検査: 準備時の基準が変わった場合や古いストックにも、根拠表現のない補足文の除去を同じ基準で適用する。
+    late = trim_unsupported(item['article'], item['facts'])
+    if late:
+        log(f'出版前検査: 事実カードに根拠表現のない文を{len(late)}文削除しました')
+        for sentence in late[:12]:
+            log('  削除: ' + sentence[:70])
+        item['article']['trimmed_sentences'] = (item['article'].get('trimmed_sentences') or []) + late[:30]
     validate_article(item['article'], item['facts'], cfg)
     topic_id = item['topic']['id']
     filename = f'0000_X4_{day.replace("-", "")}_{topic_id}.epub'
@@ -1703,6 +1789,8 @@ def publish(cfg, date=None):
     save_json_atomic(HISTORY, history + [row])
     # 出典照合用の記録(資料URL・事実カード・原稿)を残し、ストックからは外す。
     ARCHIVE.mkdir(parents=True, exist_ok=True)
+    if late:
+        save_json_atomic(selected_file, item)  # 出版した本文(削除後)と削除した文を記録に残す
     os.replace(selected_file, ARCHIVE / f'{day}_{topic_id}.json')
     log(f'出版完了: {output}')
     return output
