@@ -14,9 +14,11 @@ import json
 import os
 import re
 import sys
+import tempfile
 import time
 import unicodedata
 import uuid
+import xml.etree.ElementTree as ET
 import zipfile
 from datetime import datetime, timedelta, timezone
 from html import escape as html_escape
@@ -62,6 +64,17 @@ SKIP_DOMAINS = {
     # Wikimedia系の運営・ツール用ページ（Wikipedia Library等）。題材の資料ではない。
     'wmflabs.org', 'toolforge.org', 'mediawiki.org', 'wiktionary.org', 'wikibooks.org', 'wikiquote.org', 'wikisource.org',
 }
+# 資料の信頼度（小さいほど優先）。0=官公庁・大学・学会・企業公式(題材ごとに設定) 1=主要報道・事典・団体 2=その他 3=Wikipedia等
+TRUST_NEWS = {
+    'nikkei.com', 'asahi.com', 'mainichi.jp', 'yomiuri.co.jp', 'nhk.or.jp', 'jiji.com', 'kyodonews.jp', 'sankei.com',
+    'reuters.com', 'bloomberg.com', 'toyokeizai.net', 'diamond.jp', 'president.jp', 'nikkeibp.co.jp', 'bbc.com',
+    'britannica.com', 'kotobank.jp',
+}
+TRUST_LOW = {
+    'wikipedia.org', 'wikiwand.com', 'note.com', 'hatenablog.com', 'hatenablog.jp', 'ameblo.jp', 'fc2.com',
+    'livedoor.jp', 'naver.jp', 'qiita.com', 'zenn.dev', 'blogspot.com', 'wordpress.com',
+}
+TRUST_LABEL = {0: '公的・学術・企業公式', 1: '主要報道・事典・団体', 2: 'その他', 3: '参考(Wikipedia等)'}
 CHARS_PER_MINUTE = 500  # 日本語電子書籍の読書速度の目安（所要時間表示用）
 ALLOWED_MIMES = ('text/html', 'text/plain', 'application/xhtml+xml', 'application/pdf')
 FONT_PATHS = [
@@ -155,7 +168,7 @@ def gemini_error_detail(response):
 
 class Gemini:
     """Gemini呼び出し。主モデルが混雑・割当超過・名称不正なら予備モデルへ切り替える。"""
-    STATS = {'requests': 0, 'ok': 0, 'fallback_used': 0, 'search_calls': 0}
+    STATS = {'requests': 0, 'ok': 0, 'fallback_used': 0, 'search_calls': 0, 'by_model': {}}
     _last_call = 0.0  # 複数インスタンス(執筆役・校閲役)で呼び出し間隔を共有する
 
     def __init__(self, models, interval=0.0, max_output_tokens=32768):
@@ -171,6 +184,7 @@ class Gemini:
         self.max_output_tokens = int(max_output_tokens)
         self.blocked_until = {}
         self.used_models = []
+        self.avoid = set()  # 校閲役が、執筆役の使ったモデルを避けるための指定（独立性の確保）
         self.last_grounding = []
         self.last_queries = []
 
@@ -206,11 +220,14 @@ class Gemini:
         elif json_mode:
             config['responseMimeType'] = 'application/json'
         errors = []
-        usable = [m for m in self.models if time.time() >= self.blocked_until.get(m, 0)] or self.models
+        chain = [m for m in self.models if m not in self.avoid] or self.models
+        usable = [m for m in chain if time.time() >= self.blocked_until.get(m, 0)] or chain
         for model in usable:
+            counts = Gemini.STATS['by_model'].setdefault(model, [0, 0])  # [呼び出し回数, 成功回数]
             for attempt in range(3):
                 self._throttle()
                 Gemini.STATS['requests'] += 1
+                counts[0] += 1
                 Gemini.STATS['search_calls'] += 1 if search else 0
                 try:
                     r = requests.post(GEMINI_URL.format(model=model), headers={'x-goog-api-key': self.key},
@@ -260,6 +277,7 @@ class Gemini:
                         continue
                     break
                 Gemini.STATS['ok'] += 1
+                counts[1] += 1
                 if model not in self.used_models:
                     self.used_models.append(model)
                 if model != self.models[0]:
@@ -390,6 +408,22 @@ def source_domain_key(host):
     return '.'.join(parts[-2:])
 
 
+def source_tier(host, official=()):
+    """資料の信頼度ランク(0が最優先)。判定はホスト名だけで行い、本文の中身は見ない。"""
+    key = source_domain_key((host or '').lower().strip('.'))
+    if any(key == source_domain_key(o) for o in official or ()):
+        return 0
+    if key in TRUST_LOW:
+        return 3
+    if key in TRUST_NEWS:
+        return 1
+    if key.endswith(('.go.jp', '.lg.jp', '.ac.jp', '.ed.jp', '.gr.jp')) or key in ('who.int', 'nih.gov', 'cdc.gov', 'europa.eu'):
+        return 0
+    if key.endswith('.or.jp'):
+        return 1
+    return 2
+
+
 def grounded_candidates(topic, ai):
     """Google検索グラウンディング(課金設定済みのAPIキー向け)で資料候補 (URL, 表示名, 経路) を集める。
 
@@ -432,7 +466,7 @@ def wiki_api(params):
     return r.json()
 
 
-def wikipedia_candidates(topic, ai, per_page=8, max_external=18):
+def wikipedia_candidates(topic, ai, per_page=8, max_external=18, found=None):
     """検索グラウンディングを使えない環境(無料枠のAPIキー)での資料探し。
 
     1. モデルに検索語・記事名の候補を挙げさせる(Webには接続しない通常呼び出し)。
@@ -444,18 +478,24 @@ def wikipedia_candidates(topic, ai, per_page=8, max_external=18):
         'あなたは史実と公的資料を調査する日本語編集者。次のテーマの原典を探す準備として、'
         '日本語Wikipediaで調べる検索語と記事名の候補を挙げる。\n'
         f'テーマ: {topic["title"]}\n'
-        '記事名は実在が確実なものだけを書く。公式サイトや公的資料のURLは、確実に存在するものだけを任意で挙げ、推測で作らない。\n'
-        '返答はJSONのみ: {"queries":["検索語", ...最大4件],"titles":["記事名", ...最大5件],"urls":["https://...", ...最大4件]}'
+        '記事名は実在が確実なものだけを書く。厚生労働省などの官公庁、学会、大学、企業の公式サイト、信頼できる報道の資料URLは、'
+        '確実に存在するものだけを任意で挙げ、推測で作らない。\n'
+        '主題語は、このテーマの資料なら必ず本文に出てくる中心的な用語(例: 損益分岐点)。\n'
+        '返答はJSONのみ: {"keywords":["主題語", ...最大3件],"queries":["検索語", ...最大4件],'
+        '"titles":["記事名", ...最大5件],"urls":["https://...", ...最大4件]}'
     )
-    queries, titles, listed = [], [], []
+    queries, titles, listed, keywords = [], [], [], []
     try:
         data = ai.ask(prompt)
         if isinstance(data, dict):
             queries = [q for q in (data.get('queries') or []) if isinstance(q, str)][:4]
             titles = [t for t in (data.get('titles') or []) if isinstance(t, str)][:5]
             listed = [u.strip() for u in (data.get('urls') or []) if isinstance(u, str)][:4]
-    except GeminiError as exc:
-        log(f'検索語の生成に失敗: {str(exc)[:120]}')
+            keywords = [k.strip() for k in (data.get('keywords') or []) if isinstance(k, str) and 2 <= len(k.strip()) <= 20][:3]
+    except GeminiError:
+        raise  # API側の事情。呼び出し元で「中断・次回再開」として扱う
+    if not queries:
+        queries = [topic['title']]
     for q in queries:
         try:
             hits = wiki_api({'action': 'query', 'list': 'search', 'srsearch': q, 'srlimit': 3, 'srnamespace': 0})
@@ -464,14 +504,24 @@ def wikipedia_candidates(topic, ai, per_page=8, max_external=18):
             log(f'Wikipedia検索に失敗 ({q[:20]}): {type(exc).__name__}')
         time.sleep(0.3)
     titles = list(dict.fromkeys(t.strip() for t in titles if t.strip()))[:8]
-    pages = []
+    pages, redirected = [], {}
     if titles:
         try:
             data = wiki_api({'action': 'query', 'prop': 'extlinks', 'titles': '|'.join(titles), 'redirects': 1,
                              'ellimit': 'max', 'elprotocol': 'https'})
             pages = [p for p in data['query']['pages'] if isinstance(p, dict) and not p.get('missing')]
+            redirected = {r['to']: r['from'] for r in (data['query'].get('redirects') or [])
+                          if isinstance(r, dict) and 'to' in r and 'from' in r}
         except (requests.RequestException, ValueError, KeyError, TypeError) as exc:
             log(f'Wikipedia記事情報の取得に失敗: {type(exc).__name__}')
+    # APIが返す記事の順序は検索順ではないので、主題語を題名に含む記事→モデル/検索が挙げた順に並べ直す。
+    def title_rank(page):
+        names = [str(page.get('title', '')), redirected.get(page.get('title'), '')]
+        order = min((titles.index(n) for n in names if n in titles), default=len(titles))
+        return (0 if any(k in names[0] for k in keywords) else 1, order)
+    pages.sort(key=title_rank)
+    if found is not None:
+        found['keywords'] = keywords
     candidates, seen = [], set()
     external = []
     for page in pages:
@@ -498,12 +548,20 @@ def wikipedia_candidates(topic, ai, per_page=8, max_external=18):
 
 
 def gather_sources(topic, ai, max_sources=5, min_sources=2, per_domain=2, budget_seconds=240, use_search=True,
-                   min_chars=0):
-    """実在ページを取得し、取得に成功したページ本文だけを資料にする。"""
-    candidates = grounded_candidates(topic, ai) if use_search else wikipedia_candidates(topic, ai)
-    if use_search:
-        # Wikipedia は最後に回し、一次・公式資料を先に取得する。
-        candidates.sort(key=lambda row: 'wikipedia' in row[1])
+                   min_chars=0, official=(), trusted_min=0):
+    """実在ページを取得し、取得に成功したページ本文だけを資料にする。
+
+    官公庁・学会・大学・企業公式(official)→主要報道・事典→その他→Wikipedia等 の順に取得し、
+    信頼度ランク1以上(公的・学術・報道・事典)の資料が trusted_min 件に満たなければ失敗にする。
+    """
+    found = {}
+    candidates = grounded_candidates(topic, ai) if use_search else wikipedia_candidates(topic, ai, found=found)
+    keywords = [k for k in list(topic.get('keywords') or []) + list(found.get('keywords') or []) if k]
+
+    def rank(row):
+        host = urlparse(row[0]).hostname
+        return source_tier(row[1] if host in REDIRECT_HOSTS else host, official)
+    candidates = sorted(candidates, key=rank)  # 同順位では元の順序を保つ
     sources, domains, finals = [], {}, set()
     started = time.time()
     for url, hint, via in candidates[:16 if use_search else 30]:
@@ -516,19 +574,53 @@ def gather_sources(topic, ai, max_sources=5, min_sources=2, per_domain=2, budget
             if len(page['text']) < min_chars:
                 log(f'資料を除外[{via}]: {page["domain"]} / 本文が短い({len(page["text"])}字)')
                 continue
+            if not mentions_topic(page['text'], page.get('title', ''), keywords):
+                log(f'資料を除外[{via}]: {page["domain"]} / 主題語({"・".join(keywords)})を十分に含まない')
+                continue
             if page['url'] in finals or domains.get(key, 0) >= per_domain:
                 continue
             finals.add(page['url'])
             domains[key] = domains.get(key, 0) + 1
             page['id'] = f'S{len(sources) + 1}'
+            page['tier'] = source_tier(page['domain'], official)
             sources.append(page)
-            log(f'資料取得[{via}]: {page["domain"]} ({len(page["text"])}字) {str(page.get("title", ""))[:40]} {page["url"][:100]}')
+            log(f'資料取得[{via}/信頼度{page["tier"]}]: {page["domain"]} ({len(page["text"])}字) '
+                f'{str(page.get("title", ""))[:40]} {page["url"][:100]}')
             if len(sources) >= max_sources:
                 break
         except Exception as exc:
             log(f'資料を除外[{via}]: {hint or url[:60]} / {type(exc).__name__}: {str(exc)[:70]}')
     if len(domains) < min_sources:
         raise ValueError(f'独立したドメイン{min_sources}件以上の資料取得に失敗 (取得{len(sources)}件)')
+    trusted = sum(1 for s in sources if s['tier'] <= 1)
+    if trusted < trusted_min:
+        raise ValueError(f'公的・学術資料または信頼できる報道・事典が{trusted_min}件以上必要ですが{trusted}件でした')
+    return sources
+
+
+def mentions_topic(text, title, keywords):
+    """主題語(そのテーマの資料なら必ず出てくる用語)を、題名に含むか本文に2回以上含む資料だけを使う。"""
+    if not keywords:
+        return True
+    body, head = normalize(text), normalize(title)
+    return any(normalize(k) in head or body.count(normalize(k)) >= 2 for k in keywords)
+
+
+def refetch_sources(saved, min_chars=0, official=()):
+    """保存済みの資料URLを再取得する(AIは使わない)。取得できた資料だけ、元の出典IDで返す。"""
+    sources, finals = [], set()
+    for row in saved:
+        try:
+            page = fetch_public(row['url'])
+        except Exception as exc:
+            log(f'資料の再取得に失敗 {row["url"][:70]}: {type(exc).__name__}')
+            continue
+        if len(page['text']) < min_chars or page['url'] in finals:
+            continue
+        finals.add(page['url'])
+        page['id'] = row['id']
+        page['tier'] = source_tier(page['domain'], official)
+        sources.append(page)
     return sources
 
 
@@ -634,47 +726,115 @@ def context_window(text, excerpt, radius=220):
     return str(text)[max(0, start - radius): end + radius]
 
 
-def audit_facts(facts, sources, ai, min_facts=6, report=None):
-    """引用の存在だけでなく、引用が主張を支持するかを独立したAI呼出しで点検。
+def _ngrams(text, n=3):
+    t = normalize(text)
+    return {t[i:i + n] for i in range(max(0, len(t) - n + 1))}
 
-    この判定自体もAIなので真偽保証にはならない。支持されないカードは除外し、
-    残りが足りなければ出版しない。report(dict)を渡すと除外カードと理由を記録する。
+
+def related_passages(claim, sources, exclude_id, k=2, min_score=0.28):
+    """主張と内容が近い文を、出典以外の資料から探す(矛盾の検出と、複数資料での裏付けの確認用)。"""
+    grams = _ngrams(claim)
+    rows = []
+    if not grams:
+        return rows
+    for s in sources:
+        if s['id'] == exclude_id:
+            continue
+        best = (0.0, '')
+        for sentence in re.split(r'(?<=[。！？\n])', str(s['text'])):
+            sentence = sentence.strip()
+            if len(sentence) < 12:
+                continue
+            score = len(grams & _ngrams(sentence)) / len(grams)
+            if score > best[0]:
+                best = (score, sentence)
+        if best[0] >= min_score:
+            rows.append((best[0], s['id'], best[1][:220]))
+    rows.sort(key=lambda r: -r[0])
+    return [{'source_id': sid, 'score': round(score, 2), 'text': text} for score, sid, text in rows[:k]]
+
+
+FACT_STATUS = {'supported': '裏付けあり', 'insufficient': '根拠不足', 'contradicted': '矛盾あり'}
+
+
+def parse_fact_verdicts(verdict, known_ids):
+    """監査役の応答を {カードID: (区分, 理由)} にする。判定が無いカード・不明な区分は「根拠不足」として扱う。"""
+    rows = verdict.get('verdicts') if isinstance(verdict, dict) else None
+    if not isinstance(rows, list):
+        raise ValueError('ファクト監査の応答形式が不正(verdictsがありません)')
+    result = {}
+    for row in rows:
+        if not isinstance(row, dict) or str(row.get('id', '')).strip() not in known_ids:
+            continue
+        status = str(row.get('status', '')).strip().lower()
+        result[str(row['id']).strip()] = (status if status in FACT_STATUS else 'insufficient',
+                                          re.sub(r'\s+', ' ', str(row.get('reason', '')))[:200])
+    for fid in known_ids:
+        result.setdefault(fid, ('insufficient', '監査役が判定を返さなかった'))
+    return result
+
+
+def audit_facts(facts, sources, ai, min_facts=6, report=None, topic=None):
+    """引用の存在だけでなく、引用が主張を支持するかを独立したAI呼出しで点検する。
+
+    各カードを「裏付けあり / 根拠不足 / 矛盾あり」に分け、裏付けありだけを残す。
+    監査役には、引用と前後の原文に加えて、他の資料の近い記述も見せる(矛盾の検出用。補強には使わせない)。
+    この判定自体もAIなので真偽保証にはならない。report(dict)を渡すと判定と除外カードを記録する。
     """
     source_map = {s['id']: s for s in sources}
-    evidence = [
-        {'id': f['id'], 'claim': f['claim'],
-         'excerpt': f['evidence_excerpt'],
-         'context': context_window(source_map[f['source_id']]['text'], f['evidence_excerpt']),
-         'source_url': source_map[f['source_id']]['url']}
-        for f in facts
-    ]
+    evidence, related = [], {}
+    for f in facts:
+        others = related_passages(f['claim'], sources, f['source_id'])
+        related[f['id']] = others
+        evidence.append({'id': f['id'], 'claim': f['claim'],
+                         'excerpt': f['evidence_excerpt'],
+                         'context': context_window(source_map[f['source_id']]['text'], f['evidence_excerpt']),
+                         'other_sources': others,
+                         'source_url': source_map[f['source_id']]['url']})
     prompt = (
         '引用原文(excerpt)と、その前後の原文(context)が主張を直接支持しているか厳しく検査する事実監査官。'
-        'excerptとcontextのどちらにも書かれていない数字・年号・固有名詞・因果関係・心情・断定があれば、そのカードは不合格。'
-        '単に出典内に原文が存在するだけでは合格にしない。'
-        'URLの内容はここで追加閲覧できないので、与えられたexcerptとcontextのみで判断。'
-        '全カード合格なら {"pass":true,"issues":[]}。不合格カードがあれば '
-        '{"pass":false,"issues":["F1: 理由","F5: 理由"]} (カードID: 理由 の形式でJSONのみ)。\n'
+        '各カードを3区分で判定する。'
+        'supported=主張の数字・年号・固有名詞・因果が、excerptまたはcontextに書かれている(言い換えや要約でも、意味が原文から直接言えるなら可)。'
+        'insufficient=主張の一部でも、excerptとcontextのどちらにも書かれていない(推測・一般論・補足・断定の強め)。'
+        + (f'テーマ「{topic["title"]}」の理解に直接役立たない別テーマのカードもinsufficientとし、理由を「テーマ無関係」とする。' if topic else '')
+        +
+        'contradicted=excerptやcontext、または他資料の近い記述(other_sources)と、数字・年号・固有名詞・因果が食い違う。'
+        'other_sourcesは食い違いを見つけるためだけに使い、そこにだけ書かれた内容で補ってsupportedにしてはならない。'
+        '単に出典内に原文が存在するだけではsupportedにしない。'
+        'URLの内容はここで追加閲覧できないので、与えられた文章だけで判断。全カードの判定を返す。'
+        'JSONのみ: {"verdicts":[{"id":"F1","status":"supported","reason":"短い理由"}, ...]}\n'
         + json.dumps(evidence, ensure_ascii=False)
     )
-    verdict = ai.ask(prompt)
-    if not isinstance(verdict, dict):
+    verdicts = None
+    for attempt in range(2):
+        try:
+            verdicts = parse_fact_verdicts(ai.ask(prompt), {f['id'] for f in facts})
+            break
+        except ValueError as exc:
+            log(f'ファクト監査の応答を使えません({attempt + 1}回目): {exc}')
+    if verdicts is None:
         raise ValueError('ファクト監査の応答形式が不正')
-    issues = [str(x) for x in (verdict.get('issues') or [])]
-    if verdict.get('pass') is True and not issues:
-        return facts
-    flagged = {m for text in issues for m in re.findall(r'\bF\d+\b', text)}
-    known = {f['id'] for f in facts}
-    if not flagged or not flagged <= known:
-        raise ValueError('ファクト監査不合格(対象不明): ' + '; '.join(issues[:4]))
-    kept = [f for f in facts if f['id'] not in flagged]
-    log(f'ファクト監査で{len(flagged)}件除外: ' + '; '.join(issues[:6]))
+    counts = {k: sum(1 for st, _ in verdicts.values() if st == k) for k in FACT_STATUS}
+    log('ファクト監査: ' + ' / '.join(f'{FACT_STATUS[k]}{counts[k]}件' for k in FACT_STATUS))
+    kept, removed = [], []
     for f in facts:
-        if f['id'] in flagged:
-            log(f'  除外カード {f["id"]}[{f["source_id"]}] {f["claim"][:90]} / 引用: {f["evidence_excerpt"][:50]}')
+        status, reason = verdicts[f['id']]
+        if status == 'supported':
+            card = dict(f)
+            # 他資料にも同じ数字つきで近い記述がある場合は「複数資料で一致」と記録する(機械的な目安)
+            card['corroborated_by'] = [r['source_id'] for r in related[f['id']]
+                                       if r['score'] >= 0.35 and numbers_in(f['claim']) <= numbers_in(r['text'])]
+            kept.append(card)
+        else:
+            removed.append({'id': f['id'], 'status': status, 'reason': reason, 'claim': f['claim'],
+                            'source_id': f['source_id'], 'evidence_excerpt': f['evidence_excerpt']})
+            log(f'  除外[{FACT_STATUS[status]}] {f["id"]}({f["source_id"]}): {reason[:80]} / 主張: {f["claim"][:60]}')
+    if counts['contradicted']:
+        log('[注意] 原文または他資料と食い違うカードがありました。該当カードは使いません')
     if report is not None:
-        report['audit_issues'] = issues
-        report['audit_removed'] = [f for f in facts if f['id'] in flagged]
+        report['audit_counts'] = counts
+        report['audit_removed'] = removed
+        report['audit_kept'] = [{'id': f['id'], 'corroborated_by': f['corroborated_by']} for f in kept]
     if len(kept) < min_facts or distinct_source_count(kept, sources) < 2:
         raise ValueError(f'ファクト監査後の事実が不足: {len(kept)}件')
     return kept
@@ -728,6 +888,8 @@ def validate_article(article, facts, cfg, demo=False):
             raise ValueError('本文に出典対応する事実IDがありません')
         if any(fid not in fact_map for fid in block.get('fact_ids', [])):
             raise ValueError('存在しない事実IDを引用しています')
+        if block.get('kind', 'fact') not in ('fact', 'interpretation'):
+            raise ValueError('段落の種別(kind)が不正です')
     n = text_size(article)
     if not demo and not int(cfg['article_min_chars']) <= n <= int(cfg['article_max_chars']):
         raise ValueError(f'本文文字数が基準外: {n}字 (許容{cfg["article_min_chars"]}〜{cfg["article_max_chars"]}字)')
@@ -754,7 +916,9 @@ def write_article(topic, sources, facts, ai, cfg, feedback=None):
     prompt = (
         'あなたは資料に厳密なノンフィクション編集者。以下の検証済みファクト以外から事実を追加しない。'
         'このファクトは実在する取得資料の一致箇所から抽出してある。創作の会話・心情・数字・架空事例は厳禁。'
-        '事実と一般的な考察を区別し、考察は「～と考えられる」等と明示。'
+        '資料の事実と、AIの解釈・考察を厳密に区別する。事実を述べる段落はkindを"fact"、'
+        '解釈や一般的な考察の段落はkindを"interpretation"とし、後者は「～と考えられる」等と明示して、'
+        '新しい数字・固有名詞・出来事を含めない。interpretationは全体の2割以下にする。'
         '他人の文章を切り貼りしない。文章は独自に自然で読みやすく、冒頭の疑問を末尾で回収。'
         '数字・年号はファクトに書かれたものだけを算用数字で使い、ファクトにない数字は書かない。'
         '看護師向けの基本的な医学知識は不要。中材では病院側と受託会社側の仕事・経営に注目。'
@@ -764,7 +928,7 @@ def write_article(topic, sources, facts, ai, cfg, feedback=None):
         '原稿末尾に学び3点と関連用語3〜5語。学び・用語の説明も根拠ID必須。'
         '以下のJSON構造で回答。余計な項目は不要。'
         '{"title":"...","hook":{"text":"...","fact_ids":["F1"]},'
-        '"chapters":[{"heading":"...","paragraphs":[{"text":"...","fact_ids":["F1","F2"]}]}],'
+        '"chapters":[{"heading":"...","paragraphs":[{"text":"...","fact_ids":["F1","F2"],"kind":"fact"}]}],'
         '"ending":{"text":"...","fact_ids":["F2"]},'
         '"takeaways":[{"text":"要点A","fact_ids":["F1"]},'
         '{"text":"要点B","fact_ids":["F2"]},{"text":"要点C","fact_ids":["F3"]}],'
@@ -776,7 +940,16 @@ def write_article(topic, sources, facts, ai, cfg, feedback=None):
     if feedback:
         prompt += '\n\n前回の原稿は次の理由で不合格だった。該当箇所をファクトの範囲に直して全体を書き直すこと:\n' + feedback
     article = ai.ask(prompt)
-    validate_article(article, facts, cfg)
+    try:
+        validate_article(article, facts, cfg)
+    except ValueError as exc:
+        if feedback:
+            raise
+        # 分量不足・事実ID不備などは、理由を伝えて1回だけ書き直させる(資料・事実カードは使い回す)。
+        log(f'原稿の検証に不合格のため1回だけ書き直します: {exc}')
+        hint = ('事実カードを漏れなく使い、各章を丁寧に展開して分量を満たすこと(事実カードにない内容は足さない)。'
+                if '文字数' in str(exc) or '根拠カード' in str(exc) else '')
+        return write_article(topic, sources, facts, ai, cfg, feedback=f'検証で不合格: {exc}。{hint}')
     return article
 
 
@@ -792,12 +965,15 @@ def audit_article(article, facts, ai):
     review_blocks = ([article['hook']] + [p for c in article['chapters'] for p in c['paragraphs']]
                      + [article['ending']] + article['takeaways'] + article['terms'])
     for block in review_blocks:
-        paragraphs.append(f'根拠ID={block["fact_ids"]} 文章={block.get("text", block.get("meaning",""))}')
+        paragraphs.append(f'種別={block.get("kind", "fact")} 根拠ID={block["fact_ids"]} '
+                          f'文章={block.get("text", block.get("meaning", ""))}')
     prompt = (
         'あなたは校閲責任者。以下の原稿が「事実カードだけ」から言える内容か厳しく監査する。'
         '根拠カードの意味を越える因果関係、会話・内心・数値・年代の捏造、断定過剰、'
         '根拠にない企業実例、専門知識の誤用が1つでもあればpassをfalse。'
         '学習ポイントと用語解説にも根拠のない具体的主張がないか判定。'
+        '種別がinterpretationの段落は、事実カードにない数字・固有名詞・出来事を含まず、断定を避けているか確認する。'
+        '種別がfactの段落は、事実カードの範囲だけで書かれているか確認する。'
         '読者が面白く読めても事実不足なら不合格。編集者に甘くしない。'
         '根拠カード自体の正確性を保証できるわけではない点も考慮。'
         '不合格の場合、issuesには問題の文章の冒頭と理由を具体的に書く。'
@@ -811,48 +987,179 @@ def audit_article(article, facts, ai):
         raise AuditFailure(verdict.get('issues') or ['理由不明'])
 
 
+def work_file(topic_id):
+    return DATA / 'work' / f'{topic_id}.json'
+
+
+def recheck_facts(rows, sources):
+    """保存済みの事実カードを、再取得した資料の本文で再検査する。カードIDは保存時のまま保つ。"""
+    source_map = {s['id']: s for s in sources}
+    haystack = {sid: normalize(s['text']) for sid, s in source_map.items()}
+    kept = []
+    for f in rows:
+        try:
+            sid, excerpt, claim = f['source_id'], f['evidence_excerpt'], f['claim']
+        except (KeyError, TypeError):
+            continue
+        if sid in source_map and normalize(excerpt) in haystack[sid] and numbers_in(claim) <= numbers_in(excerpt):
+            kept.append(f)
+    return kept
+
+
+def facts_usable(facts, saved, sources, fact_min):
+    return bool(saved) and len(facts) == len(saved) and len(facts) >= fact_min \
+        and distinct_source_count(facts, sources) >= 2
+
+
+def verify_epub(path):
+    """完成したEPUBの構造を検査する(ZIP順序・XMLの整合・参照ファイルの存在・図版が白黒で幅が適切か)。"""
+    try:
+        with zipfile.ZipFile(path) as z:
+            names = z.namelist()
+            if not names or names[0] != 'mimetype' or z.read('mimetype') != b'application/epub+zip':
+                raise ValueError('mimetypeが先頭にない、または内容が不正')
+            ET.fromstring(z.read('META-INF/container.xml'))
+            ns = {'o': 'http://www.idpf.org/2007/opf'}
+            opf = ET.fromstring(z.read('OEBPS/content.opf'))
+            items = opf.findall('./o:manifest/o:item', ns)
+            ids = {it.get('id') for it in items}
+            for it in items:
+                member = 'OEBPS/' + it.get('href', '')
+                if member not in names:
+                    raise ValueError(f'manifestのファイルがありません: {member}')
+                kind = it.get('media-type', '')
+                if kind in ('application/xhtml+xml', 'application/x-dtbncx+xml'):
+                    ET.fromstring(z.read(member))
+                elif kind == 'image/png':
+                    with Image.open(io.BytesIO(z.read(member))) as img:
+                        if img.mode != '1' or img.width > 600:
+                            raise ValueError(f'図版が白黒1bit・幅600px以下ではありません: {member}')
+            for ref in opf.findall('./o:spine/o:itemref', ns):
+                if ref.get('idref') not in ids:
+                    raise ValueError('spineが存在しない項目を参照しています')
+    except (ET.ParseError, KeyError, OSError, zipfile.BadZipFile) as exc:
+        raise ValueError(f'EPUB検査で異常: {type(exc).__name__}: {str(exc)[:80]}') from exc
+
+
 def prepare_one(topic, cfg, ai, auditor=None):
-    """auditor(独立した校閲役のモデル)があれば、執筆役とは別モデルで監査する。"""
+    """資料取得→事実抽出→事実監査→執筆→校閲→EPUB生成検査→入庫。
+
+    auditor(独立した校閲役)があれば執筆役とは別モデルで監査する。
+    成功した工程は data/knowledge/work/ に保存し、API制限などで中断したときは次回そこから再開する
+    (資料の本文は保存せず、保存済みURLから再取得する)。内容の不備で失敗した場合は途中結果を捨てる。
+    """
     auditor = auditor or ai
     log(f'調査開始: {topic["title"]}')
-    # 失敗の原因調査用に、資料・事実カード・除外理由を data/knowledge/debug/ に残す（公開資料の抜粋のみ）。
+    calls0 = Gemini.STATS['requests']
+    ck_path = work_file(topic['id'])
+    ck = read_json(ck_path, {})
+    official = list((cfg.get('official_domains') or {}).get(topic['id'], []))
+    min_chars, fact_min = int(cfg.get('source_min_chars', 800)), int(cfg['fact_min'])
+    # 失敗の原因調査用に、資料・事実カード・判定を data/knowledge/debug/ に残す（公開資料の抜粋のみ）。
     dbg = {'topic': topic['id'], 'title': topic['title'], 'at': now().isoformat()}
+
+    def checkpoint(**kw):
+        ck.update(kw)
+        ck['saved_at'] = now().isoformat()
+        save_json_atomic(ck_path, ck)
+
     try:
-        sources = gather_sources(topic, ai, min_sources=int(cfg.get('source_min', 2)),
-                                 use_search=bool(cfg.get('search_grounding', False)),
-                                 min_chars=int(cfg.get('source_min_chars', 800)))
+        sources = None
+        if ck.get('sources'):
+            sources = refetch_sources(ck['sources'], min_chars, official)
+            if len({source_domain_key(s['domain']) for s in sources}) >= int(cfg.get('source_min', 2)):
+                log(f'途中結果から再開します: 保存済みの資料{len(sources)}件を再取得しました')
+            else:
+                sources = None
+        if sources is None:
+            ck.clear()
+            sources = gather_sources(topic, ai, min_sources=int(cfg.get('source_min', 2)),
+                                     use_search=bool(cfg.get('search_grounding', False)),
+                                     min_chars=min_chars, official=official,
+                                     trusted_min=int(cfg.get('source_trusted_min', 1)))
+            checkpoint(sources=[{'id': s['id'], 'url': s['url']} for s in sources])
         dbg['sources'] = [{'id': s['id'], 'url': s['url'], 'title': str(s.get('title', ''))[:80],
-                           'chars': len(s['text']), 'head': s['text'][:160]} for s in sources]
-        facts = extract_facts(topic, sources, ai, int(cfg['fact_min']))
-        dbg['facts'] = facts
-        facts = audit_facts(facts, sources, auditor, int(cfg['fact_min']), report=dbg)
-        article = write_article(topic, sources, facts, ai, cfg)
-        for round_ in range(2):
+                           'tier': s.get('tier'), 'chars': len(s['text']), 'head': s['text'][:160]} for s in sources]
+
+        facts = None
+        if ck.get('audited_facts'):
+            facts = recheck_facts(ck['audited_facts'], sources)
+            if facts_usable(facts, ck['audited_facts'], sources, fact_min):
+                log('監査済みの事実カードを再利用します')
+            else:
+                facts = None
+                ck.pop('audited_facts', None)
+                for key in ('article', 'article_audited'):
+                    ck.pop(key, None)
+        if facts is None:
+            raw = recheck_facts(ck.get('facts') or [], sources)
+            if facts_usable(raw, ck.get('facts'), sources, fact_min):
+                log('抽出済みの事実カードを再利用します')
+            else:
+                raw = extract_facts(topic, sources, ai, fact_min)
+                checkpoint(facts=raw)
+            dbg['facts'] = raw
+            auditor.avoid = set(ai.used_models)  # 執筆役と同じモデルは校閲に使わない(他に使えるモデルがある限り)
+            facts = audit_facts(raw, sources, auditor, fact_min, report=dbg, topic=topic)
+            checkpoint(audited_facts=facts)
+
+        article = ck.get('article')
+        if article:
             try:
-                audit_article(article, facts, auditor)
-                break
-            except AuditFailure as exc:
-                log(f'校閲指摘({round_ + 1}回目): ' + '; '.join(exc.issues[:3]))
-                dbg.setdefault('article_issues', []).append(exc.issues[:6])
-                if round_ == 1:
-                    raise
-                article = write_article(topic, sources, facts, ai, cfg, feedback='\n'.join(exc.issues[:6]))
+                validate_article(article, facts, cfg)
+            except ValueError:
+                article = None
+                ck.pop('article_audited', None)
+        if article is None:
+            article = write_article(topic, sources, facts, ai, cfg)
+            checkpoint(article=article, article_audited=False)
+        if not ck.get('article_audited'):
+            for round_ in range(2):
+                auditor.avoid = set(ai.used_models)
+                try:
+                    audit_article(article, facts, auditor)
+                    break
+                except AuditFailure as exc:
+                    log(f'校閲指摘({round_ + 1}回目): ' + '; '.join(exc.issues[:3]))
+                    dbg.setdefault('article_issues', []).append(exc.issues[:6])
+                    if round_ == 1:
+                        raise
+                    article = write_article(topic, sources, facts, ai, cfg, feedback='\n'.join(exc.issues[:6]))
+                    checkpoint(article=article, article_audited=False)
+            checkpoint(article_audited=True)
+    except GeminiError:
+        log(f'Geminiを使えず中断: 成功した工程は保存済みです。次回そこから再開します '
+            f'(この題材のAPI呼び出し{Gemini.STATS["requests"] - calls0}回)')
+        raise
     except Exception as exc:
         dbg['error'] = f'{type(exc).__name__}: {exc}'[:500]
         try:
             save_json_atomic(DATA / 'debug' / (topic['id'] + '.json'), dbg)
+            ck_path.unlink(missing_ok=True)
         except Exception as save_exc:
             log(f'デバッグ記録の保存に失敗: {save_exc}')
         raise
-    slim_sources = [{k: x[k] for k in ('id', 'url', 'title', 'domain')} for x in sources]
+    slim_sources = [{k: x[k] for k in ('id', 'url', 'title', 'domain') + (('tier',) if 'tier' in x else ())}
+                    for x in sources]
     overlap = sorted(set(ai.used_models) & set(auditor.used_models))
     if overlap:
         log('[注意] 執筆役と校閲役に同じモデルが使われました（独立性が下がります）: ' + ', '.join(overlap))
     obj = {'topic': topic, 'sources': slim_sources, 'facts': facts, 'article': article,
            'prepared_at': now().isoformat(),
            'models': {'writer': ai.used_models, 'auditor': auditor.used_models, 'shared': overlap}}
+    # 出版時にEPUBを必ず作れることを、入庫前に確認する(失敗しても途中結果は残す)。
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            probe = Path(tmp) / 'probe.epub'
+            make_epub(obj, probe, now().strftime('%Y-%m-%d'))
+            verify_epub(probe)
+    except Exception as exc:
+        log(f'[ERROR] EPUB生成検査に失敗(途中結果は保存済み): {type(exc).__name__}: {str(exc)[:160]}')
+        raise
     save_json_atomic(QUEUE / (topic['id'] + '.json'), obj)
-    log(f'校閲合格・入庫: {topic["id"]} ({text_size(article)}字、出典{len(slim_sources)}件)')
+    ck_path.unlink(missing_ok=True)
+    log(f'校閲合格・入庫: {topic["id"]} ({text_size(article)}字、出典{len(slim_sources)}件、'
+        f'API呼び出し{Gemini.STATS["requests"] - calls0}回)')
 
 
 def pending():
@@ -964,6 +1271,8 @@ def prepare(cfg, maximum, target, only=None):
                 except Exception as ex:
                     log(f'新テーマの補充に失敗: {category} / {ex}')
         queue_topics = list(next_topics(dict(cfg, topics=all_topics), used | blocked))
+    # 前回API制限などで途中まで進んだ題材を先に再開する。
+    queue_topics.sort(key=lambda t: not work_file(t['id']).exists())
     made, tried = 0, 0
     for t in queue_topics:
         if made >= maximum or (not only and len(pending()) >= target) or tried >= maximum * 3:
@@ -973,12 +1282,17 @@ def prepare(cfg, maximum, target, only=None):
             prepare_one(t, cfg, ai, auditor)
             failed.pop(t['id'], None)
             made += 1
+        except GeminiError as ex:
+            # API側の事情(割当超過・混雑)で止まっただけなので、題材を失敗扱いにせず、次回続きから再開する。
+            log(f'Geminiを使えないため準備を中断します: {str(ex)[:200]}')
+            break
         except Exception as ex:
             failed[t['id']] = {'last_try': now().isoformat(), 'reason': str(ex)[:250]}
             log(f'出版候補を棄却: {t["id"]} / {ex}')
     save_json_atomic(FAILED, failed)
     log(f'Gemini集計: 成功{Gemini.STATS["ok"]}回 / 呼び出し{Gemini.STATS["requests"]}回'
         f' (検索付き{Gemini.STATS["search_calls"]}回, 予備モデル使用{Gemini.STATS["fallback_used"]}回)')
+    log('モデル別(呼び出し/成功): ' + ', '.join(f'{m} {c[0]}/{c[1]}' for m, c in Gemini.STATS['by_model'].items()))
     log(f'今回の入庫{made}冊、ストック合計{len(pending())}冊')
 
 
@@ -1137,7 +1451,10 @@ def make_epub(obj, destination, date_str):
     for n, chapter in enumerate(a['chapters'], 1):
         content = f'<h2>第{n}章　{x(chapter["heading"])}</h2>'
         for p in chapter['paragraphs']:
-            content += f'<p>{x(p["text"])}{cite_mark(p, facts)}</p>'
+            if p.get('kind') == 'interpretation':
+                content += f'<p class="interp"><b>【考察】</b>{x(p["text"])}{cite_mark(p, facts)}</p>'
+            else:
+                content += f'<p>{x(p["text"])}{cite_mark(p, facts)}</p>'
         entries.append((f'chapter{n}.xhtml', xhtml_document(chapter['heading'], content)))
     closing = f'<h2>結び</h2><p>{x(a["ending"]["text"])}{cite_mark(a["ending"], facts)}</p>'
     closing += '<h2>今日覚えたい3つのこと</h2><ol>'
@@ -1152,9 +1469,16 @@ def make_epub(obj, destination, date_str):
     refs = '<h2>参考資料</h2><p>出典番号は本文中の番号と対応。以下のURLは作成時に取得した公開資料です。</p><ol>'
     for s in sources:
         num = int(s['id'][1:])
+        label = TRUST_LABEL.get(s.get('tier'), '')
         refs += (f'<li id="src-{num}">{x(s["title"])}'
-                 f'<p class="url"><a href="{x(s["url"])}">{x(s["url"])}</a></p></li>')
-    refs += '</ol><p class="small">本文はAIが上記の公開資料から独自に再構成しています。出典との対応はAI校閲も使用していますが、誤りがない保証ではありません。重要な判断には原典を確認してください。</p>'
+                 + (f'<span class="small">（{x(label)}）</span>' if label else '')
+                 + f'<p class="url"><a href="{x(s["url"])}">{x(s["url"])}</a></p></li>')
+    refs += ('</ol><p class="small">本文はAIが上記の公開資料から独自に再構成しています。【考察】と付けた段落は、資料に書かれた事実ではなく、'
+             'それを踏まえたAIの解釈です。出典との対応はAI校閲も使用していますが、誤りがない保証ではありません。'
+             '重要な判断には原典を確認してください。</p>')
+    checked = [f for f in obj['facts'] if f.get('corroborated_by')]
+    if obj['facts'] and 'corroborated_by' in obj['facts'][0]:
+        refs += f'<p class="small">事実カード{len(obj["facts"])}件のうち、複数の資料で同じ内容を機械的に確認できたものは{len(checked)}件です。</p>'
     used_models = sorted(set((obj.get('models') or {}).get('writer', []) + (obj.get('models') or {}).get('auditor', [])))
     if used_models:
         refs += f'<p class="small">作成に使用したAIモデル: {x(", ".join(used_models))}</p>'
@@ -1168,6 +1492,7 @@ def make_epub(obj, destination, date_str):
     img {display:block; width:100%; max-width:100%; height:auto; margin:1em auto;}
     sup {font-size:.7em;} dt {font-weight:bold; margin-top:.6em;} dd {margin-left:1em;}
     li {margin-bottom:.6em; overflow-wrap:anywhere;}
+    .interp {border-left:3px solid #000; padding-left:.6em; text-indent:0;}
     '''
     nav = '<nav epub:type="toc" id="toc"><h1>目次</h1><ol>'
     tocitems = [('intro.xhtml', title)] + [(n, f'第{i}章 {c["heading"]}') for i, (n, c) in enumerate(zip([f'chapter{k}.xhtml' for k in range(1,len(a['chapters'])+1)], a['chapters']), 1)]
@@ -1289,6 +1614,11 @@ def publish(cfg, date=None):
     filename = f'0000_X4_{day.replace("-", "")}_{topic_id}.epub'
     output = BOOKS / filename
     uid = make_epub(item, output, day)
+    try:
+        verify_epub(output)
+    except ValueError:
+        output.unlink(missing_ok=True)
+        raise
     row = {'date': day, 'timestamp': now().isoformat(), 'topic_id': topic_id,
            'title': item['article']['title'], 'uid': uid, 'filename': filename}
     # OPDSを書けることを先に確認。失敗したら未公開ストックを維持する。
