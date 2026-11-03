@@ -110,13 +110,33 @@ class GeminiError(RuntimeError):
     pass
 
 
-def gemini_error_detail(response):
-    """Googleが返すエラー本文（割当超過か混雑かの手がかり）を短く取り出す。APIキーは含まれない。"""
+def gemini_error_info(response):
+    """Googleのエラー本文から (メッセージ, 超過した割当ID, 再試行までの秒数) を取り出す。APIキーは含まれない。"""
     try:
-        message = response.json().get('error', {}).get('message', '')
+        error = response.json().get('error', {})
     except (ValueError, AttributeError):
-        message = ''
-    return re.sub(r'\s+', ' ', message or response.text or '')[:260]
+        error = {}
+    if not isinstance(error, dict):
+        error = {}
+    quota_ids, retry = [], 0.0
+    for d in error.get('details') or []:
+        if not isinstance(d, dict):
+            continue
+        for v in d.get('violations') or []:
+            if isinstance(v, dict) and (v.get('quotaId') or v.get('quotaMetric')):
+                quota_ids.append(str(v.get('quotaId') or v.get('quotaMetric')))
+        m = re.fullmatch(r'(\d+(?:\.\d+)?)s', str(d.get('retryDelay', '')))
+        if m:
+            retry = float(m.group(1))
+    message = error.get('message') or getattr(response, 'text', '') or ''
+    return re.sub(r'\s+', ' ', message)[:200], list(dict.fromkeys(quota_ids)), retry
+
+
+def gemini_error_detail(response):
+    """割当超過か混雑かの手がかり(超過した割当IDと再試行秒数つき)を短い文字列にする。"""
+    message, quota_ids, retry = gemini_error_info(response)
+    extra = quota_ids + ([f'retryDelay={retry:g}s'] if retry else [])
+    return message + (' [' + ' / '.join(extra) + ']' if extra else '')
 
 
 class Gemini:
@@ -192,9 +212,15 @@ class Gemini:
                     detail = gemini_error_detail(r)
                     errors.append(f'{model}: HTTP {r.status_code}')
                     log(f'Gemini混雑/制限 {model} HTTP {r.status_code} ({attempt + 1}回目): {detail}')
+                    if r.status_code == 429 and 'PerDay' in detail:
+                        # 1日あたりの上限は待っても回復しないため、同じモデルで再試行せず予備モデルへ移る
+                        self.blocked_until[model] = time.time() + 3600
+                        break
                     if attempt < 2:
                         retry_after = r.headers.get('Retry-After', '')
-                        time.sleep(min(int(retry_after) if retry_after.isdigit() else 8 * (attempt + 1), 40))
+                        suggested = gemini_error_info(r)[2]
+                        wait = int(retry_after) if retry_after.isdigit() else (suggested + 1 if suggested else 8 * (attempt + 1))
+                        time.sleep(min(wait, 65))
                         continue
                     self.blocked_until[model] = time.time() + 120
                     break
