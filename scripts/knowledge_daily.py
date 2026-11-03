@@ -170,6 +170,7 @@ class Gemini:
     """Gemini呼び出し。主モデルが混雑・割当超過・名称不正なら予備モデルへ切り替える。"""
     STATS = {'requests': 0, 'ok': 0, 'fallback_used': 0, 'search_calls': 0, 'by_model': {}}
     _last_call = 0.0  # 複数インスタンス(執筆役・校閲役)で呼び出し間隔を共有する
+    BLOCKED = {}      # モデル名 -> 使えない期限。1日の上限に達したモデルを、執筆役と校閲役の両方が避けるため共有する
 
     def __init__(self, models, interval=0.0, max_output_tokens=32768):
         self.key = os.environ.get('GEMINI_API_KEY', '')
@@ -182,7 +183,7 @@ class Gemini:
             raise ValueError('モデル名が不正です')
         self.interval = float(interval)
         self.max_output_tokens = int(max_output_tokens)
-        self.blocked_until = {}
+        self.blocked_until = Gemini.BLOCKED
         self.used_models = []
         self.avoid = set()  # 校閲役が、執筆役の使ったモデルを避けるための指定（独立性の確保）
         self.last_grounding = []
@@ -245,7 +246,8 @@ class Gemini:
                     log(f'Gemini混雑/制限 {model} HTTP {r.status_code} ({attempt + 1}回目): {detail}')
                     if r.status_code == 429 and 'PerDay' in detail:
                         # 1日あたりの上限は待っても回復しないため、同じモデルで再試行せず予備モデルへ移る
-                        self.blocked_until[model] = time.time() + 3600
+                        # (再試行までの秒数が返ってくれば、割当がリセットされる時刻まで避ける)
+                        self.blocked_until[model] = time.time() + max(3600, gemini_error_info(r)[2] + 60)
                         break
                     if attempt < 2:
                         retry_after = r.headers.get('Retry-After', '')
@@ -908,11 +910,16 @@ def validate_article(article, facts, cfg, demo=False):
     return n
 
 
-def write_article(topic, sources, facts, ai, cfg, feedback=None):
+def write_article(topic, sources, facts, ai, cfg, feedback=None, _retry=True):
     evidence = '\n'.join(f'{f["id"]}: {f["claim"]} (資料 {f["source_id"]})' for f in facts)
     goal = {'story': '実在の事件・企業史の流れを通して、転機と理由を面白く読ませる',
             'explanation': '中材の業務運営・受託経営・ビジネスの仕組みを分かりやすく解説'}[topic['kind']]
-    size = '概ね3500〜6000字' if topic['kind'] == 'story' else '概ね2500〜4500字'
+    lo, hi = int(cfg['article_min_chars']), int(cfg['article_max_chars'])
+    base = lo + (1000 if topic['kind'] == 'story' else 500)  # 下限ぎりぎりで不合格にならないよう、目標は下限より上に置く
+    size = f'{base}〜{min(hi - 500, base + (2500 if topic["kind"] == "story" else 1500))}字を目標に(最低でも{lo}字)'
+    domain_hint = ('看護師向けの基本的な医学知識は不要。中材では病院側と受託会社側の仕事・経営に注目。'
+                   if topic.get('category') in ('hospital', 'outsourcing') else
+                   'テーマと関係のない業界・事例(病院や中材など)に話を広げない。')
     prompt = (
         'あなたは資料に厳密なノンフィクション編集者。以下の検証済みファクト以外から事実を追加しない。'
         'このファクトは実在する取得資料の一致箇所から抽出してある。創作の会話・心情・数字・架空事例は厳禁。'
@@ -921,8 +928,8 @@ def write_article(topic, sources, facts, ai, cfg, feedback=None):
         '新しい数字・固有名詞・出来事を含めない。interpretationは全体の2割以下にする。'
         '他人の文章を切り貼りしない。文章は独自に自然で読みやすく、冒頭の疑問を末尾で回収。'
         '数字・年号はファクトに書かれたものだけを算用数字で使い、ファクトにない数字は書かない。'
-        '看護師向けの基本的な医学知識は不要。中材では病院側と受託会社側の仕事・経営に注目。'
-        f'ねらい: {goal}。本文は{size} (極端な水増しは禁止。ファクトで足りない部分は書かず短くてよい)。'
+        + domain_hint +
+        f'ねらい: {goal}。本文は{size} (ファクトの内容を丁寧に言い換えて展開するのは構わないが、ファクトにない内容での水増しは禁止)。'
         '見出し3〜6、各章に2〜5段落。冒頭は90〜200字、結びは150〜250字。'
         '各段落には必ず根拠になったファクトIDを1個以上fact_idsに入れる。'
         '原稿末尾に学び3点と関連用語3〜5語。学び・用語の説明も根拠ID必須。'
@@ -943,13 +950,15 @@ def write_article(topic, sources, facts, ai, cfg, feedback=None):
     try:
         validate_article(article, facts, cfg)
     except ValueError as exc:
-        if feedback:
+        if not _retry:
+            exc.draft = article  # 原因調査用に、不合格だった原稿を呼び出し元へ渡す
             raise
         # 分量不足・事実ID不備などは、理由を伝えて1回だけ書き直させる(資料・事実カードは使い回す)。
         log(f'原稿の検証に不合格のため1回だけ書き直します: {exc}')
         hint = ('事実カードを漏れなく使い、各章を丁寧に展開して分量を満たすこと(事実カードにない内容は足さない)。'
                 if '文字数' in str(exc) or '根拠カード' in str(exc) else '')
-        return write_article(topic, sources, facts, ai, cfg, feedback=f'検証で不合格: {exc}。{hint}')
+        note = f'検証で不合格: {exc}。{hint}'
+        return write_article(topic, sources, facts, ai, cfg, feedback=(feedback + '\n' if feedback else '') + note, _retry=False)
     return article
 
 
@@ -1133,9 +1142,17 @@ def prepare_one(topic, cfg, ai, auditor=None):
         raise
     except Exception as exc:
         dbg['error'] = f'{type(exc).__name__}: {exc}'[:500]
+        if isinstance(getattr(exc, 'draft', None), dict):
+            dbg['article_draft'] = exc.draft
         try:
             save_json_atomic(DATA / 'debug' / (topic['id'] + '.json'), dbg)
-            ck_path.unlink(missing_ok=True)
+            if ck.get('audited_facts'):
+                # 事実の監査までは合格済み。原稿の不備だけなら、資料・事実を使い回して原稿から作り直せるよう残す。
+                for key in ('article', 'article_audited'):
+                    ck.pop(key, None)
+                save_json_atomic(ck_path, ck)
+            else:
+                ck_path.unlink(missing_ok=True)
         except Exception as save_exc:
             log(f'デバッグ記録の保存に失敗: {save_exc}')
         raise
@@ -1158,6 +1175,12 @@ def prepare_one(topic, cfg, ai, auditor=None):
         raise
     save_json_atomic(QUEUE / (topic['id'] + '.json'), obj)
     ck_path.unlink(missing_ok=True)
+    dbg['result'] = 'queued'
+    dbg['article_chars'] = text_size(article)
+    try:
+        save_json_atomic(DATA / 'debug' / (topic['id'] + '.json'), dbg)  # 成功時も、資料・事実・監査結果を残す
+    except OSError as save_exc:
+        log(f'デバッグ記録の保存に失敗: {save_exc}')
     log(f'校閲合格・入庫: {topic["id"]} ({text_size(article)}字、出典{len(slim_sources)}件、'
         f'API呼び出し{Gemini.STATS["requests"] - calls0}回)')
 
@@ -1294,6 +1317,60 @@ def prepare(cfg, maximum, target, only=None):
         f' (検索付き{Gemini.STATS["search_calls"]}回, 予備モデル使用{Gemini.STATS["fallback_used"]}回)')
     log('モデル別(呼び出し/成功): ' + ', '.join(f'{m} {c[0]}/{c[1]}' for m, c in Gemini.STATS['by_model'].items()))
     log(f'今回の入庫{made}冊、ストック合計{len(pending())}冊')
+
+
+def tampered_cards(rows):
+    """事実カードをわざと壊した「偽の事実」を作る(監査役が見逃さないかを確かめる陰性対照用)。"""
+    if len(rows) < 6:
+        raise ValueError('自己検査に使える事実カードが足りません')
+    genuine = [dict(f) for f in rows[:4]]
+    base = rows[4:]
+    cards = []
+
+    def add(kind, source, **changes):
+        card = dict(source, **changes)
+        card['id'] = f'T{len(cards) + 1}'
+        card['kind'] = kind
+        cards.append(card)
+    add('資料にない一般化を足した', base[0], claim=base[0]['claim'].rstrip('。') + '。この考え方は国内の大企業のほぼすべてが採用している。')
+    numbered = next((f for f in base if re.search(r'\d', f['claim'])), base[1])
+    add('数字を書き換えた', numbered, claim=re.sub(r'\d+', lambda m: str(int(m.group()) + 3), numbered['claim'], count=1))
+    other = next((f for f in base if f['source_id'] != base[0]['source_id']), base[-1])
+    add('別の箇所の引用を付けた', base[0], source_id=other['source_id'], evidence_excerpt=other['evidence_excerpt'])
+    add('テーマと無関係な話', base[0], claim='ミトコンドリアは、細胞の中でエネルギーを作り出す小器官である。')
+    return genuine, cards
+
+
+def selftest(cfg, topic_id):
+    """監査役が改ざんした偽の事実を通さないかを、実際のGemini APIで確かめる(陰性対照)。
+    本物のカードは裏付けありと判定され、偽カードは全て裏付けなしと判定されなければ失敗とする。"""
+    dbg = read_json(DATA / 'debug' / f'{topic_id}.json', {})
+    if not dbg.get('sources') or not dbg.get('facts'):
+        raise ValueError(f'data/knowledge/debug/{topic_id}.json に資料・事実カードがありません')
+    official = list((cfg.get('official_domains') or {}).get(topic_id, []))
+    sources = refetch_sources([{'id': s['id'], 'url': s['url']} for s in dbg['sources']],
+                              int(cfg.get('source_min_chars', 800)), official)
+    genuine, fakes = tampered_cards(recheck_facts(dbg['facts'], sources))
+    _, auditor = make_ai(cfg)
+    report = {}
+    try:
+        audit_facts(genuine + fakes, sources, auditor, min_facts=1, report=report, topic={'title': dbg['title']})
+    except ValueError:
+        pass  # 残ったカードが少ないときの例外。判定結果はreportに入っている
+    removed = {r['id']: r for r in report.get('audit_removed', [])}
+    kept = {k['id'] for k in report.get('audit_kept', [])}
+    failures = []
+    for card in fakes:
+        row = removed.get(card['id'])
+        log(f'  偽カード {card["id"]}({card["kind"]}): ' +
+            (f'{FACT_STATUS[row["status"]]} / {row["reason"][:80]}' if row else '【通過してしまった】'))
+        if card['id'] in kept:
+            failures.append(card['id'])
+    for card in genuine:
+        log(f'  本物カード {card["id"]}: ' + ('裏付けあり' if card['id'] in kept else f'除外({removed.get(card["id"], {}).get("reason", "")[:60]})'))
+    log(f'自己検査: 偽カード{len(fakes)}件中{len(fakes) - len(failures)}件を除外 / 本物カード{len(genuine)}件中{sum(c["id"] in kept for c in genuine)}件を採用')
+    if failures:
+        raise ValueError('監査役が偽の事実を通過させました: ' + ', '.join(failures))
 
 
 def jp_font(size=20):
@@ -1667,6 +1744,8 @@ def main():
     p.add_argument('--target', type=int, default=None)
     p.add_argument('--only', default='', help='指定したトピックID(カンマ区切り)だけを準備する')
     sub.add_parser('publish', help='検証済み原稿から今日の1冊を出版')
+    t = sub.add_parser('selftest', help='監査役が偽の事実を見逃さないかを実APIで確かめる(陰性対照)')
+    t.add_argument('--topic', required=True, help='data/knowledge/debug/ に記録のあるトピックID')
     d = sub.add_parser('demo', help='API不要の図版とEPUB生成サンプル')
     d.add_argument('--output', default='demo_x4.epub')
     args = parser.parse_args()
@@ -1677,6 +1756,8 @@ def main():
         prepare(cfg, maximum, target, [x.strip() for x in args.only.split(',')])
     elif args.command == 'publish':
         publish(cfg)
+    elif args.command == 'selftest':
+        selftest(cfg, args.topic)
     else:
         demo(cfg, ROOT / args.output)
 
