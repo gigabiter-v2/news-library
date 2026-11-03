@@ -410,6 +410,17 @@ def source_domain_key(host):
     return '.'.join(parts[-2:])
 
 
+LISTING_URL_RE = re.compile(
+    r'(/result[s]?(/|$|\?)|/search(/|$|\?)|[?&](q|query|keyword|globalSearchKey|searchword|s)=|/tag/|/category/|/list(/|$|\?))',
+    re.I)
+LISTING_TITLE_RE = re.compile(r'(検索結果|詳細検索|search results?)', re.I)
+
+
+def is_listing_page(url, title=''):
+    """検索結果・一覧ページか。ホストが官公庁・学会でも、これは記事本文ではないので出典にしない。"""
+    return bool(LISTING_URL_RE.search(url or '') or LISTING_TITLE_RE.search(title or ''))
+
+
 def source_tier(host, official=()):
     """資料の信頼度ランク(0が最優先)。判定はホスト名だけで行い、本文の中身は見ない。"""
     key = source_domain_key((host or '').lower().strip('.'))
@@ -575,6 +586,9 @@ def gather_sources(topic, ai, max_sources=5, min_sources=2, per_domain=2, budget
         try:
             page = fetch_public(url)
             key = source_domain_key(page['domain'])
+            if is_listing_page(page['url'], page.get('title', '')):
+                log(f'資料を除外[{via}]: {page["domain"]} / 検索結果・一覧ページ(記事本文ではない)')
+                continue
             if len(page['text']) < min_chars:
                 log(f'資料を除外[{via}]: {page["domain"]} / 本文が短い({len(page["text"])}字)')
                 continue
