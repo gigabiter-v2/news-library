@@ -1356,5 +1356,15 @@ class PublishTests(TempEnv):
         self.assertEqual((self.root / 'sent_articles.json').read_text(encoding='utf-8'), '{}')
 
 
+class ListingPageTests(unittest.TestCase):
+    def test_search_and_list_pages_are_not_sources(self):
+        self.assertTrue(kd.is_listing_page('https://www.jstage.jst.go.jp/result/global/-char/ja?globalSearchKey=%22x%22'))
+        self.assertTrue(kd.is_listing_page('https://example.com/a', '詳細検索結果'))
+        self.assertTrue(kd.is_listing_page('https://example.com/?q=abc'))
+        self.assertFalse(kd.is_listing_page('https://kotobank.jp/word/%E6%BB%85%E8%8F%8C-141464', '滅菌とは'))
+        self.assertFalse(kd.is_listing_page('https://ja.wikipedia.org/wiki/%E6%BB%85%E8%8F%8C', '滅菌 - Wikipedia'))
+
+
 if __name__ == '__main__':
     unittest.main()
+
