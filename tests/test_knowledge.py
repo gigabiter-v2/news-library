@@ -117,8 +117,11 @@ class FakeAI:
         raise AssertionError('想定外のプロンプト: ' + prompt[:50])
 
 
+SUPPORTED = '創業者は第1工場の建設を決断し、地域の雇用を広げた。'  # sentences() の事実カードを言い換えた、根拠のある文
+
+
 def make_article(ids):
-    def blk(i, text='段落の本文です。創業者の決断と地域への影響が資料に記されている。' * 3):
+    def blk(i, text=SUPPORTED * 4):
         return {'text': text, 'fact_ids': [ids[i % len(ids)]]}
     return {
         'title': '架空資料で確認する工場拡大の歩み',
@@ -520,6 +523,17 @@ class WikiCandidateTests(TempEnv):
         self.assertEqual([r[2] for r in rows], ['wiki', 'wikiref', 'wikiref', 'listed'])
         self.assertEqual(ai.search_flags, [False])  # Google検索つき呼び出しはしない
 
+    def test_dictionary_headwords_are_tried_first_as_independent_sources(self):
+        ai = mock.Mock()
+        ai.ask.return_value = {'keywords': ['損益分岐点', '固定費', '余り'], 'queries': ['検索語A'], 'titles': [], 'urls': []}
+        with mock.patch.object(kd, 'wiki_api', side_effect=self.fake_api), mock.patch.object(kd.time, 'sleep', lambda s: None):
+            rows = kd.wikipedia_candidates({'title': 't'}, ai)
+        self.assertEqual(rows[0][2:], ('dict',))
+        self.assertEqual([r[0] for r in rows[:2]],
+                         ['https://kotobank.jp/word/' + kd.url_quote('損益分岐点', safe=''),
+                          'https://kotobank.jp/word/' + kd.url_quote('固定費', safe='')])
+        self.assertEqual(kd.source_tier('kotobank.jp'), 1)  # 事典=信頼度1(Wikipediaは3)
+
     def test_wikipedia_api_failure_does_not_crash(self):
         ai = FakeAI(sources_urls=['https://official.example.org/p'])
         with mock.patch.object(kd, 'wiki_api', side_effect=kd.requests.ConnectionError('down')), \
@@ -869,7 +883,7 @@ class ArticleRetryTests(TempEnv):
         a = make_article(self.ids)
         for c in a['chapters']:
             for p in c['paragraphs']:
-                p['text'] = '短い。'
+                p['text'] = SUPPORTED
         a['hook']['text'] = a['ending']['text'] = '短い。'
         return a
 
@@ -910,6 +924,110 @@ class ArticleRetryTests(TempEnv):
         self.assertEqual(ai.ask.call_count, 1)
 
 
+class TrimUnsupportedTests(TempEnv):
+    """実際の生成物(biz_breakeven)で見つかった「事実カードにない補足文」を、機械的に取り除けるか。"""
+
+    FACTS = [
+        {'id': 'F1', 'source_id': 'S1',
+         'claim': '経済学において利子は、イギリスでは伝統的に費用ではないとされるが、フランスやドイツなどの大陸経済学では固定費用として扱われるなど見解が分かれる。',
+         'evidence_excerpt': '利子はイギリスの経済学では伝統的に利潤からの分岐で費用ではないが、フランス・ドイツなど大陸の経済学ではレオン・ワルラスのように費用として扱い、固定費用に入れられる。'},
+        {'id': 'F2', 'source_id': 'S1',
+         'claim': '1970年代ころからは固定費を「キャパシティ・コスト（経営能力費）」と理解し、発生させる意思決定の時点でのコントロールが効果的であると考えられている。',
+         'evidence_excerpt': '1970年代ころからは、固定費のコントロールを重視し、その発生源泉の観点から、これをキャパシティ・コスト（経営能力費）と理解し'},
+        {'id': 'F3', 'source_id': 'S2',
+         'claim': '会計学上の固定費は、短期間では一定と見なせるが、数年という長期的な視点で見ると、実際には売上高の増加に応じて増加することが多い。',
+         'evidence_excerpt': 'あくまでも短期間で見た時に一定と見なせる費用のことであり、数年という長期で見てみると、実際には売り上げの増加に応じて増加することが多い'},
+    ]
+    # 本物の生成文(根拠あり) と 事実カードにない補足(根拠なし)
+    GOOD = [
+        '経済学における費用の扱いには、国による違いも見られる。',
+        '例えば利子について、イギリスの伝統的な経済学では費用に含まないとするが、フランスやドイツなどの大陸経済学では固定費用として扱うなど、見解が分かれている。',
+        '1970年代頃からは、固定費を「キャパシティ・コスト（経営能力費）」と定義し、その費用を発生させる意思決定のタイミングでコントロールすることが効果的であるという考え方が普及した。',
+        '会計学上の固定費は、短期間の分析においては一定の額として扱われるが、数年単位の長期的な視点で見ると、売上高の増加に伴って実際には増加していくことが多い。',
+    ]
+    BAD = [
+        'このような学術的な背景の違いは、現代の会計実務における費用の分類思想にも影響を与えている側面がある。',
+        'これは、一度発生が決まった固定費は短期的には変更が難しいため、事前の計画が重要であることを示唆している。',
+        'これは、事業規模の拡大に合わせて設備投資や人員補充が行われるためであり、固定費が完全に不変である期間は限られていることを示している。',
+    ]
+
+    def article(self, paragraphs, kind='fact'):
+        return {'chapters': [{'heading': 'h', 'paragraphs': [dict(p, kind=p.get('kind', kind)) for p in paragraphs]}]}
+
+    def test_real_elaborations_are_removed_and_real_paraphrases_are_kept(self):
+        art = self.article([{'text': ''.join(self.GOOD[1:2] + self.BAD[:1]), 'fact_ids': ['F1']},
+                            {'text': ''.join(self.GOOD[2:3] + self.BAD[1:2]), 'fact_ids': ['F2']},
+                            {'text': ''.join(self.GOOD[3:4] + self.BAD[2:3]), 'fact_ids': ['F3']}])
+        removed = kd.trim_unsupported(art, self.FACTS)
+        self.assertEqual(removed, self.BAD)
+        self.assertEqual([p['text'] for p in art['chapters'][0]['paragraphs']], self.GOOD[1:4])
+
+    def test_every_real_paraphrase_scores_above_every_real_elaboration(self):
+        grams = {f['id']: kd.card_bigrams([f['id']], {x['id']: x for x in self.FACTS}) for f in self.FACTS}
+        good = [kd.sentence_support(self.GOOD[i], grams[f]) for i, f in ((1, 'F1'), (2, 'F2'), (3, 'F3'))]
+        bad = [kd.sentence_support(self.BAD[i], grams[f]) for i, f in ((0, 'F1'), (1, 'F2'), (2, 'F3'))]
+        self.assertGreater(min(good), kd.SUPPORT_MIN)
+        self.assertLess(max(bad), kd.SUPPORT_MIN)
+
+    def test_interpretation_paragraphs_are_not_trimmed(self):
+        art = self.article([{'text': self.BAD[0], 'fact_ids': ['F1'], 'kind': 'interpretation'},
+                            {'text': self.GOOD[1], 'fact_ids': ['F1']}])
+        self.assertEqual(kd.trim_unsupported(art, self.FACTS), [])
+        self.assertEqual(len(art['chapters'][0]['paragraphs']), 2)
+
+    def test_paragraph_and_chapter_with_only_unsupported_sentences_are_dropped(self):
+        art = self.article([{'text': self.BAD[0] + self.BAD[1], 'fact_ids': ['F1']}])
+        art['chapters'].append({'heading': 'h2', 'paragraphs': [{'text': self.GOOD[1], 'fact_ids': ['F1']}]})
+        removed = kd.trim_unsupported(art, self.FACTS)
+        self.assertEqual(len(removed), 2)
+        self.assertEqual([c['heading'] for c in art['chapters']], ['h2'])
+
+    def test_malformed_article_is_ignored(self):
+        self.assertEqual(kd.trim_unsupported({'chapters': 'x'}, self.FACTS), [])
+        self.assertEqual(kd.trim_unsupported({'chapters': [None, {'paragraphs': 'x'}]}, self.FACTS), [])
+
+    def test_write_article_trims_records_and_logs_removed_sentences(self):
+        s = sentences(10)
+        facts = [{'id': f'F{i + 1}', 'claim': s[i], 'source_id': 'S1', 'evidence_excerpt': s[i]} for i in range(10)]
+        art = make_article([f['id'] for f in facts])
+        extra = 'この動きは業界全体の将来に大きな意義を持つと言える。'
+        art['chapters'][0]['paragraphs'][0]['text'] += extra
+        ai = mock.Mock()
+        ai.ask.return_value = art
+        out = kd.write_article({'id': 't', 'title': 'テーマ', 'kind': 'explanation'}, [], facts, ai, TEST_CFG)
+        self.assertNotIn(extra, out['chapters'][0]['paragraphs'][0]['text'])
+        self.assertEqual(out['trimmed_sentences'], [extra])
+        self.assertEqual(ai.ask.call_count, 1)
+
+    def test_too_short_after_trim_gets_one_rewrite_that_tells_why(self):
+        s = sentences(10)
+        facts = [{'id': f'F{i + 1}', 'claim': s[i], 'source_id': 'S1', 'evidence_excerpt': s[i]} for i in range(10)]
+        padded = make_article([f['id'] for f in facts])
+        filler = 'この取り組みは社会に広く重要な意義を示している。'
+        for c in padded['chapters']:
+            for p in c['paragraphs']:
+                p['text'] = SUPPORTED + filler * 12
+        ai = mock.Mock()
+        ai.ask.side_effect = [padded, make_article([f['id'] for f in facts])]
+        cfg = dict(TEST_CFG, article_min_chars=500)
+        out = kd.write_article({'id': 't', 'title': 'テーマ', 'kind': 'explanation'}, [], facts, ai, cfg)
+        self.assertEqual(ai.ask.call_count, 2)
+        retry_prompt = ai.ask.call_args_list[1][0][0]
+        self.assertIn('機械的に削除', retry_prompt)
+        self.assertIn('補足で埋めず', retry_prompt)
+        self.assertNotIn('trimmed_sentences', out)
+
+    def test_prompt_separates_facts_from_commentary(self):
+        ai = mock.Mock()
+        s = sentences(10)
+        facts = [{'id': f'F{i + 1}', 'claim': s[i], 'source_id': 'S1', 'evidence_excerpt': s[i]} for i in range(10)]
+        ai.ask.return_value = make_article([f['id'] for f in facts])
+        kd.write_article({'id': 't', 'title': 'テーマ', 'kind': 'explanation'}, [], facts, ai, TEST_CFG)
+        prompt = ai.ask.call_args[0][0]
+        self.assertIn('言い換えて述べるだけ', prompt)
+        self.assertIn('interpretation段落に分け', prompt)
+
+
 class ArticlePromptTests(TempEnv):
     def prompt_for(self, category):
         ai = mock.Mock()
@@ -929,7 +1047,7 @@ class ArticlePromptTests(TempEnv):
 
     def test_length_target_is_above_the_minimum(self):
         prompt = self.prompt_for('business')
-        self.assertIn(f'{TEST_CFG["article_min_chars"] + 500}〜', prompt)
+        self.assertIn(f'{TEST_CFG["article_min_chars"] + 700}〜', prompt)
         self.assertIn(f'最低でも{TEST_CFG["article_min_chars"]}字', prompt)
 
 
@@ -1171,11 +1289,27 @@ class PublishTests(TempEnv):
         self.stock('bio1', 'biography')
         path = kd.QUEUE / 'bio1.json'
         obj = json.loads(path.read_text(encoding='utf-8'))
-        obj['article']['chapters'][0]['paragraphs'][0]['text'] = '1999年のことだった。' * 10
+        obj['article']['hook']['fact_ids'] = ['F99']  # 存在しない事実ID
         kd.save_json_atomic(path, obj)
         with self.assertRaises(ValueError):
             kd.publish(self.cfg(), '2026-11-03')
         self.assertFalse(kd.HISTORY.exists())
+
+    def test_publish_gate_removes_unsupported_sentences_from_old_stock(self):
+        """準備時の基準より前に入庫した原稿も、出版前に同じ基準で補足文を除去する。"""
+        self.stock('bio1', 'biography')
+        path = kd.QUEUE / 'bio1.json'
+        obj = json.loads(path.read_text(encoding='utf-8'))
+        extra = 'このことは現代の経営全体に大きな影響を与えている側面がある。'
+        paragraph = obj['article']['chapters'][0]['paragraphs'][0]
+        paragraph['text'] = paragraph['text'] + extra
+        kd.save_json_atomic(path, obj)
+        out = kd.publish(self.cfg(), '2026-11-03')
+        with zipfile.ZipFile(out) as z:
+            body = ''.join(z.read(n).decode('utf-8') for n in z.namelist() if n.endswith('.xhtml'))
+        self.assertNotIn('側面がある', body)
+        archived = json.loads(next(kd.ARCHIVE.glob('*bio1.json')).read_text(encoding='utf-8'))
+        self.assertIn(extra, archived['article']['trimmed_sentences'])
 
     def test_existing_news_files_are_untouched(self):
         (self.root / 'feed.xml').write_text('<feed>news</feed>', encoding='utf-8')
