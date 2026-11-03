@@ -6,13 +6,13 @@ site_base_url: "https://gigabiter-v2.github.io/news-library"
 # --- Gemini ---------------------------------------------------------------
 # 執筆・事実抽出役。混雑/割当超過のとき fallback_models を順に試す。
 # 無料枠のAPIキーは「モデル系統ごとに1日20リクエスト」まで（太平洋時間0時=日本時間17時にリセット）。
-# 1冊で約5〜7回呼ぶ。3.7/3.5 は 3.8/3.6 と同じ枠を共有するため並べても余裕は増えない。
-# 3.6 系統は既存のニュース配信が毎朝ほぼ使い切るので、執筆役の2番手以降・校閲役の後ろに置く。
+# 1冊で約5〜8回呼ぶ。3.7 は 3.8、3.5-flash は 3.6-flash と同じ枠(自動転送)なので、並べても予備にならない。
+# 3.6 系統(3.5-flash を含む)は既存のニュース配信が毎朝使うので、この図書館のモデル列には入れない。
 model: "gemini-3.8-flash"
-fallback_models: ["gemini-3.6-flash", "gemini-3-flash-preview", "gemini-3.5-flash-lite"]
+fallback_models: ["gemini-3-flash-preview", "gemini-3.5-flash-lite"]
 # 事実監査・原稿校閲役は、執筆役とは別モデルを先に使う（同じ癖での見落としを減らす）。
 audit_model: "gemini-3-flash-preview"
-audit_fallback_models: ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.1-flash-lite", "gemini-3.5-flash-lite"]
+audit_fallback_models: ["gemini-3.8-flash", "gemini-3.1-flash-lite", "gemini-3.5-flash-lite"]
 gemini_interval_seconds: 6      # 呼び出し間隔（分間上限対策）
 # 資料探しの方式。false=Wikipedia記事とその参考文献リンクから探す（無料枠のAPIキーで動く）。
 # true=Google検索グラウンディングで探す（課金設定済みのキーが必要。無料枠では全呼び出しが429になる）。
@@ -24,6 +24,7 @@ article_min_chars: 2500         # 本文の下限。約5分（1分500字換算�
 article_max_chars: 7000         # 本文の上限。約14分
 fact_min: 8                     # 原文照合を通過した事実カードの最低数
 source_min: 2                   # 独立した取得元ドメインの最低数
+source_trusted_min: 1           # うち、官公庁・学会・大学・企業公式・主要報道・事典(信頼度0〜1)の最低数。Wikipediaだけでは出版しない
 source_min_chars: 800            # Wikipedia起点の資料探しで、本文がこれより短いページ(目録レコード等)は出典にしない
 max_new_per_run: 2              # 1回の実行で新規に調べる冊数上限（APIと時間の節約）
 stock_target: 3                 # 常に確保しておく未公開ストック数
@@ -119,3 +120,19 @@ topics:
      title: "伊能忠敬と日本全国の測量"}
   - {id: disc_fleming, category: discovery, kind: story,
      title: "フレミングとペニシリンの発見"}
+
+# --- 題材ごとの「公式・一次資料」ドメイン ---------------------------------------------
+# ここに書いたドメインは資料探しで最優先(信頼度0)にする。官公庁(.go.jp)・大学(.ac.jp)・学会(.gr.jp)は自動で信頼度0。
+# 書いていない題材は、主要報道・事典(信頼度1)を最低1件含めることで足りる。
+official_domains:
+  bio_matsushita: [holdings.panasonic, panasonic.com, konosuke-matsushita.com]
+  bio_honda: [honda.co.jp, honda.com, global.honda]
+  bio_toyoda: [toyota.co.jp, toyota-global.com, global.toyota, toyota.jp]
+  bio_shibusawa: [shibusawa.or.jp]
+  bio_sony: [sony.com, sony.co.jp, sony.net]
+  case_fujifilm: [fujifilm.com, holdings.fujifilm.com]
+  case_nintendo: [nintendo.co.jp, nintendo.com]
+  case_jal: [jal.com, jal.co.jp]
+  case_yamato: [yamato-hd.co.jp, kuronekoyamato.co.jp]
+  case_seven: [sej.co.jp, 7andi.com]
+  disc_fleming: [nobelprize.org]
