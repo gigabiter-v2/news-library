@@ -4,6 +4,7 @@
 """
 import io
 import json
+import time
 import re
 import sys
 import tempfile
@@ -151,6 +152,7 @@ class TempEnv(unittest.TestCase):
         kd.BOOKS = self.root / 'books' / 'knowledge'
         kd.FEED = self.root / 'knowledge_feed.xml'
         kd._ROBOTS.clear()
+        kd.Gemini.BLOCKED.clear()
 
     def tearDown(self):
         for k, v in self.saved.items():
@@ -260,6 +262,8 @@ class GeminiTests(unittest.TestCase):
         self.addCleanup(patcher.stop)
         sleep = mock.patch.object(kd.time, 'sleep', lambda s: None)
         sleep.start()
+        kd.Gemini.BLOCKED.clear()
+        self.addCleanup(kd.Gemini.BLOCKED.clear)
         self.addCleanup(sleep.stop)
         kd.Gemini.STATS.update(requests=0, ok=0, fallback_used=0, search_calls=0)
 
@@ -360,6 +364,24 @@ class GeminiTests(unittest.TestCase):
         with mock.patch.object(kd.requests, 'post', side_effect=post):
             self.assertEqual(kd.Gemini(['day', 'good']).ask('p'), {'ok': 1})
         self.assertEqual(sum('/day:' in c for c in calls), 1)
+
+    def test_daily_quota_block_is_shared_with_other_instances_until_reset(self):
+        body = {'error': {'message': 'quota', 'details': [
+            {'violations': [{'quotaId': 'GenerateRequestsPerDayPerProjectPerModel-FreeTier'}]},
+            {'retryDelay': '5271s'}]}}
+        calls = []
+
+        def post(url, **kw):
+            calls.append(url)
+            if '/day:' in url:
+                return FakeResponse(429, body)
+            return FakeResponse(200, gemini_body('{"ok":1}'))
+        with mock.patch.object(kd.requests, 'post', side_effect=post):
+            kd.Gemini(['day', 'good']).ask('p')  # 執筆役が上限に当たる
+            auditor = kd.Gemini(['day', 'good'])
+            auditor.ask('p')  # 校閲役は、上限に達したモデルへ無駄に問い合わせない
+        self.assertEqual(sum('/day:' in c for c in calls), 1)
+        self.assertGreater(kd.Gemini.BLOCKED['day'] - time.time(), 5271)
 
 
 # ---- 資料取得 -----------------------------------------------------------------
@@ -867,10 +889,157 @@ class ArticleRetryTests(TempEnv):
             kd.write_article(self.topic, [], self.facts, ai, self.cfg)
         self.assertEqual(ai.ask.call_count, 2)
 
+    def test_rewrite_after_audit_feedback_also_gets_one_retry_with_both_reasons(self):
+        good = make_article(self.ids)
+        ai = self.scripted([self.short_article(), good])
+        out = kd.write_article(self.topic, [], self.facts, ai, self.cfg, feedback='第1章に根拠のない主張')
+        self.assertIs(out, good)
+        retry_prompt = ai.ask.call_args_list[1][0][0]
+        self.assertIn('第1章に根拠のない主張', retry_prompt)
+        self.assertIn('本文文字数が基準外', retry_prompt)
+
+    def test_failed_draft_is_attached_to_the_error(self):
+        ai = self.scripted([self.short_article(), self.short_article()])
+        with self.assertRaises(ValueError) as cm:
+            kd.write_article(self.topic, [], self.facts, ai, self.cfg)
+        self.assertIsInstance(cm.exception.draft, dict)
+
     def test_valid_first_draft_is_not_rewritten(self):
         ai = self.scripted([make_article(self.ids)])
         kd.write_article(self.topic, [], self.facts, ai, self.cfg)
         self.assertEqual(ai.ask.call_count, 1)
+
+
+class ArticlePromptTests(TempEnv):
+    def prompt_for(self, category):
+        ai = mock.Mock()
+        s = sentences(10)
+        facts = [{'id': f'F{i + 1}', 'claim': s[i], 'source_id': 'S1', 'evidence_excerpt': s[i]} for i in range(10)]
+        ai.ask.return_value = make_article([f['id'] for f in facts])
+        kd.write_article({'id': 't', 'title': 'テーマ', 'kind': 'explanation', 'category': category}, [], facts, ai, TEST_CFG)
+        return ai.ask.call_args[0][0]
+
+    def test_hospital_focus_applies_only_to_hospital_topics(self):
+        """損益分岐点の記事に「中材」の話が混ざった不具合の再発防止。"""
+        self.assertIn('病院側と受託会社側', self.prompt_for('hospital'))
+        self.assertIn('病院側と受託会社側', self.prompt_for('outsourcing'))
+        business = self.prompt_for('business')
+        self.assertNotIn('病院側と受託会社側', business)
+        self.assertIn('テーマと関係のない', business)
+
+    def test_length_target_is_above_the_minimum(self):
+        prompt = self.prompt_for('business')
+        self.assertIn(f'{TEST_CFG["article_min_chars"] + 500}〜', prompt)
+        self.assertIn(f'最低でも{TEST_CFG["article_min_chars"]}字', prompt)
+
+
+class ResumeTests(TempEnv):
+    """途中で失敗しても、成功した工程(資料・事実抽出・監査)をやり直さない。"""
+
+    def setUp(self):
+        super().setUp()
+        self.topic = {'id': 't_demo', 'category': 'biography', 'kind': 'story', 'title': '架空資料で確認する工場拡大の歩み'}
+        self.pages = {'https://a.example.co.jp/p': fake_source('x', 'a.example.co.jp'),
+                      'https://b.example.org/p': fake_source('x', 'b.example.org', year0=1930)}
+        for u, p in self.pages.items():
+            p['url'] = u
+
+    def run_prepare(self, ai, cfg=TEST_CFG):
+        ai.pages = {'S1': self.pages['https://a.example.co.jp/p'], 'S2': self.pages['https://b.example.org/p']}
+        with mock.patch.object(kd, 'fetch_public', side_effect=lambda url: dict(self.pages[url])):
+            kd.prepare_one(self.topic, cfg, ai)
+
+    def checkpoint(self):
+        return json.loads(kd.work_file('t_demo').read_text(encoding='utf-8'))
+
+    def test_article_failure_keeps_audited_facts_and_resumes_from_writing(self):
+        too_long = dict(TEST_CFG, article_min_chars=50000, article_max_chars=90000)
+        first = FakeAI()
+        with self.assertRaises(ValueError):
+            self.run_prepare(first, too_long)
+        ck = self.checkpoint()
+        self.assertTrue(ck['audited_facts'])
+        self.assertNotIn('article', ck)
+        dbg = json.loads((kd.DATA / 'debug' / 't_demo.json').read_text(encoding='utf-8'))
+        self.assertIn('本文文字数が基準外', dbg['error'])
+        self.assertIsInstance(dbg['article_draft'], dict)  # 不合格だった原稿を確認できる
+        second = FakeAI()
+        self.run_prepare(second)
+        self.assertEqual(second.calls, ['write', 'audit_article'])  # 資料探し・事実抽出・事実監査は呼ばない
+        self.assertTrue((kd.QUEUE / 't_demo.json').exists())
+        self.assertFalse(kd.work_file('t_demo').exists())
+
+    def test_api_outage_keeps_progress_and_resume_skips_finished_stages(self):
+        class Down(FakeAI):
+            def ask(self, prompt, search=False, json_mode=True):
+                if 'ノンフィクション編集者' in prompt:
+                    raise kd.GeminiError('全モデルで失敗')
+                return super().ask(prompt, search, json_mode)
+        with self.assertRaises(kd.GeminiError):
+            self.run_prepare(Down())
+        self.assertTrue(self.checkpoint()['audited_facts'])
+        self.assertFalse((kd.DATA / 'failed.json').exists())  # 中断は「失敗題材」として記録しない
+        resumed = FakeAI()
+        self.run_prepare(resumed)
+        self.assertNotIn('extract', resumed.calls)
+        self.assertNotIn('audit_facts', resumed.calls)
+        self.assertNotIn('search', resumed.calls)
+        self.assertTrue((kd.QUEUE / 't_demo.json').exists())
+
+    def test_success_leaves_a_debug_record_with_audit_results(self):
+        self.run_prepare(FakeAI())
+        dbg = json.loads((kd.DATA / 'debug' / 't_demo.json').read_text(encoding='utf-8'))
+        self.assertEqual(dbg['result'], 'queued')
+        self.assertEqual(dbg['audit_counts']['supported'], len(dbg['audit_kept']))
+        self.assertTrue(dbg['sources'][0]['tier'] in (0, 1, 2, 3))
+
+    def test_extraction_failure_discards_everything(self):
+        ai = FakeAI(fact_status={f'F{i}': 'insufficient' for i in range(1, 12)})
+        with self.assertRaises(ValueError):
+            self.run_prepare(ai)
+        self.assertFalse(kd.work_file('t_demo').exists())  # 事実が使えない場合は途中結果を残さない
+
+
+class SelftestTests(TempEnv):
+    def setUp(self):
+        super().setUp()
+        self.pages = {'https://a.example.co.jp/p': fake_source('x', 'a.example.co.jp'),
+                      'https://b.example.org/p': fake_source('x', 'b.example.org', year0=1930)}
+        for u, p in self.pages.items():
+            p['url'] = u
+        s1, s2 = sentences(12), sentences(12, 1930)
+        self.facts = [{'id': f'F{i + 1}', 'claim': (s2 if i % 2 else s1)[i], 'source_id': 'S2' if i % 2 else 'S1',
+                       'evidence_excerpt': (s2 if i % 2 else s1)[i]} for i in range(10)]
+        self.pages = {'https://a.example.co.jp/p': dict(fake_source('S1', 'a.example.co.jp'), url='https://a.example.co.jp/p'),
+                      'https://b.example.org/p': dict(fake_source('S2', 'b.example.org', year0=1930), url='https://b.example.org/p')}
+        save = kd.save_json_atomic
+        save(kd.DATA / 'debug' / 't.json', {'title': 'テーマ', 'sources': [
+            {'id': 'S1', 'url': 'https://a.example.co.jp/p'}, {'id': 'S2', 'url': 'https://b.example.org/p'}], 'facts': self.facts})
+
+    def run_selftest(self, flag_fakes):
+        class Auditor:
+            def ask(inner, prompt, **kw):
+                ids = list(dict.fromkeys(re.findall(r'"id": "([FT]\d+)"', prompt)))
+                return {'verdicts': [{'id': i, 'status': 'insufficient' if i.startswith('T') and flag_fakes else 'supported',
+                                      'reason': 'テスト'} for i in ids]}
+        with mock.patch.object(kd, 'fetch_public', side_effect=lambda u: dict(self.pages[u])), \
+                mock.patch.object(kd, 'make_ai', return_value=(None, Auditor())):
+            kd.selftest(TEST_CFG, 't')
+
+    def test_tampered_cards_are_built_from_real_ones(self):
+        genuine, fakes = kd.tampered_cards(self.facts)
+        self.assertEqual(len(genuine), 4)
+        self.assertEqual(len(fakes), 4)
+        self.assertTrue(all(c['id'].startswith('T') for c in fakes))
+        self.assertNotEqual(fakes[1]['claim'], self.facts[5]['claim'])  # 数字が書き換わっている
+        self.assertIn('ミトコンドリア', fakes[3]['claim'])
+
+    def test_passes_when_every_fake_is_rejected(self):
+        self.run_selftest(flag_fakes=True)
+
+    def test_fails_when_the_auditor_lets_fakes_through(self):
+        with self.assertRaises(ValueError):
+            self.run_selftest(flag_fakes=False)
 
 
 class EpubTests(TempEnv):
