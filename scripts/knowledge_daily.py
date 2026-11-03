@@ -128,8 +128,10 @@ def gemini_error_info(response):
         m = re.fullmatch(r'(\d+(?:\.\d+)?)s', str(d.get('retryDelay', '')))
         if m:
             retry = float(m.group(1))
-    message = error.get('message') or getattr(response, 'text', '') or ''
-    return re.sub(r'\s+', ' ', message)[:200], list(dict.fromkeys(quota_ids)), retry
+    message = re.sub(r'\s+', ' ', error.get('message') or getattr(response, 'text', '') or '')[:700]
+    if not quota_ids and error.get('details'):
+        message += ' details=' + json.dumps(error['details'], ensure_ascii=False)[:400]
+    return message, list(dict.fromkeys(quota_ids)), retry
 
 
 def gemini_error_detail(response):
