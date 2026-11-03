@@ -1,0 +1,91 @@
+name: Knowledge Daily Book
+
+# 毎日1冊のノンフィクションを作成し knowledge_feed.xml(OPDS)で配信する。
+# 既存のニュース配信(daily-digest.yml, feed.xml, books/0000_X4_NEWS.epub)には触れない。
+
+on:
+  schedule:
+    # 毎日 JST 6:30 (UTC 21:30 = 前日)。ニュース配信(6:00)と同時に git push しないよう30分ずらす。
+    - cron: "30 21 * * *"
+  workflow_dispatch:
+    inputs:
+      only:
+        description: "調べるトピックID(カンマ区切り)。空なら曜日ジャンルから自動選択"
+        required: false
+        default: ""
+      max_new:
+        description: "新規に調べる冊数。0なら調査せず出版のみ。空なら設定値"
+        required: false
+        default: ""
+      publish:
+        description: "調査後に今日の1冊を出版する"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: knowledge-daily
+  cancel-in-progress: false
+
+jobs:
+  build-knowledge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Japanese font
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq fonts-noto-cjk
+
+      - name: Install dependencies
+        run: pip install -r requirements-knowledge.txt
+
+      - name: Offline tests
+        run: python -m unittest discover -s tests -p "test_knowledge.py" -v
+
+      - name: Prepare (research, fact check, write, review)
+        id: prepare
+        continue-on-error: true
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          ONLY: ${{ inputs.only }}
+          MAX_NEW: ${{ inputs.max_new }}
+        run: |
+          args=()
+          if [ -n "$MAX_NEW" ]; then args+=(--max-new "$MAX_NEW"); fi
+          if [ -n "$ONLY" ]; then args+=(--only "$ONLY"); fi
+          python scripts/knowledge_daily.py prepare "${args[@]}"
+
+      - name: Publish today's book
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.publish }}
+        run: python scripts/knowledge_daily.py publish
+
+      - name: Commit and push
+        if: ${{ always() }}
+        run: |
+          git config user.name "knowledge-library-bot"
+          git config user.email "actions@users.noreply.github.com"
+          for path in books/knowledge data/knowledge knowledge_feed.xml; do
+            if [ -e "$path" ]; then git add "$path"; fi
+          done
+          git diff --cached --quiet || git commit -m "Knowledge library: $(date -u +'%Y-%m-%d')"
+          for attempt in 1 2 3; do
+            git pull --rebase origin main && git push && break
+            sleep 5
+          done
+
+      - name: Fail the run if research crashed
+        if: ${{ steps.prepare.outcome == 'failure' }}
+        run: |
+          echo "準備工程が異常終了しました。ログの [ERROR] を確認してください。出版済みストックがあれば出版は実行済みです。"
+          exit 1
