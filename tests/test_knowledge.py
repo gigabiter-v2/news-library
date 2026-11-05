@@ -155,6 +155,7 @@ class TempEnv(unittest.TestCase):
         kd.BOOKS = self.root / 'books' / 'knowledge'
         kd.FEED = self.root / 'knowledge_feed.xml'
         kd.LIBRARY_FEED = self.root / 'library_feed.xml'
+        kd.NEWS_FEED = self.root / 'feed.xml'
         kd._ROBOTS.clear()
         kd.Gemini.BLOCKED.clear()
 
@@ -1319,6 +1320,20 @@ class PublishTests(TempEnv):
         self.assertTrue(hrefs[0].endswith('/books/0000_X4_NEWS.epub'))
         self.assertTrue(hrefs[1].endswith('/books/knowledge/a.epub'))
 
+    def test_news_feed_gets_knowledge_entries_without_touching_news_entry(self):
+        news = ('<?xml version="1.0" encoding="UTF-8"?>\n<feed xmlns="http://www.w3.org/2005/Atom">\n<id>x</id>\n'
+                '<entry><title>0000 N</title><link rel="http://opds-spec.org/acquisition" href="https://h/books/0000_X4_NEWS.epub" type="application/epub+zip"/></entry>\n</feed>\n')
+        kd.NEWS_FEED.write_text(news, encoding='utf-8')
+        h = [{'date': '2026-11-03', 'title': 'T', 'uid': 'urn:uuid:a', 'timestamp': '2026-11-03T06:00:00+09:00', 'filename': 'a.epub'}]
+        kd.update_feed(CFG, h)
+        kd.update_feed(CFG, h)  # 2回呼んでも重複しない
+        ns = {'a': 'http://www.w3.org/2005/Atom'}
+        root = ET.fromstring(kd.NEWS_FEED.read_bytes())
+        hrefs = [e.find('a:link', ns).get('href') for e in root.findall('a:entry', ns)]
+        self.assertEqual(len(hrefs), 2)
+        self.assertTrue(hrefs[0].endswith('/books/0000_X4_NEWS.epub'))
+        self.assertTrue(hrefs[1].endswith('/books/knowledge/a.epub'))
+
     def test_feed_failure_keeps_stock_and_history(self):
         self.stock('bio1', 'biography')
         with mock.patch.object(kd, 'update_feed', side_effect=OSError('disk')):
@@ -1360,7 +1375,7 @@ class PublishTests(TempEnv):
         (self.root / 'sent_articles.json').write_text('{}', encoding='utf-8')
         self.stock('bio1', 'biography')
         kd.publish(self.cfg(), '2026-11-03')
-        self.assertEqual((self.root / 'feed.xml').read_text(encoding='utf-8'), '<feed>news</feed>')
+        self.assertTrue((self.root / 'feed.xml').read_text(encoding='utf-8').startswith('<feed>news'))  # 既存の中身は残し、知識の本の項目だけが後ろに足される
         self.assertEqual((self.root / 'books' / '0000_X4_NEWS.epub').read_bytes(), b'news')
         self.assertEqual((self.root / 'sent_articles.json').read_text(encoding='utf-8'), '{}')
 
