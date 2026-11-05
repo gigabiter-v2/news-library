@@ -86,7 +86,7 @@ jobs:
         run: |
           git config user.name "knowledge-library-bot"
           git config user.email "actions@users.noreply.github.com"
-          for path in books/knowledge data/knowledge knowledge_feed.xml library_feed.xml; do
+          for path in books/knowledge data/knowledge knowledge_feed.xml library_feed.xml feed.xml; do
             if [ -e "$path" ]; then git add "$path"; fi
           done
           git diff --cached --quiet || git commit -m "Knowledge library: $(date -u +'%Y-%m-%d')"
