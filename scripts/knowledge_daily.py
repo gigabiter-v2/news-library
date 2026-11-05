@@ -47,6 +47,7 @@ FAILED = DATA / 'failed.json'
 ARCHIVE = DATA / 'published'
 BOOKS = ROOT / 'books' / 'knowledge'
 FEED = ROOT / 'knowledge_feed.xml'
+NEWS_FEED = ROOT / 'feed.xml'              # 既存ニュースのフィード。知識の本の項目だけを足す(ニュース項目・ニュース用スクリプトは変更しない)
 LIBRARY_FEED = ROOT / 'library_feed.xml'   # ニュース1冊＋知識の本をまとめた入口(X4にOPDS URLを1つしか登録できない場合用)
 JST = timezone(timedelta(hours=9))
 UA = 'X4KnowledgeLibrary/1.1 (public-source educational EPUB builder)'
@@ -1801,6 +1802,25 @@ def update_feed(cfg, history):
     tmp = LIBRARY_FEED.with_suffix('.xml.tmp')
     tmp.write_text(library, encoding='utf-8')
     os.replace(tmp, LIBRARY_FEED)
+    add_to_news_feed(entries)
+
+
+def add_to_news_feed(entries):
+    """X4が登録している既存の feed.xml に、知識の本の項目を足す。前回足した分は消して入れ直す。失敗してもニュースには影響させない。"""
+    try:
+        if not NEWS_FEED.exists():
+            return
+        text = NEWS_FEED.read_text(encoding='utf-8')
+        if '</feed>' not in text:
+            return
+        text = re.sub(r'\s*<entry>(?:(?!</entry>).)*?/books/knowledge/(?:(?!</entry>).)*?</entry>', '', text, flags=re.S)
+        text = text.replace('</feed>', entries + '</feed>', 1)
+        ET.fromstring(text.encode('utf-8'))
+        tmp = NEWS_FEED.with_suffix('.xml.tmp')
+        tmp.write_text(text, encoding='utf-8')
+        os.replace(tmp, NEWS_FEED)
+    except Exception as ex:
+        log(f'ニュースのフィードへの追加をスキップしました: {type(ex).__name__}')
 
 
 def publish(cfg, date=None):
