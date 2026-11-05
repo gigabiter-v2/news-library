@@ -47,6 +47,7 @@ FAILED = DATA / 'failed.json'
 ARCHIVE = DATA / 'published'
 BOOKS = ROOT / 'books' / 'knowledge'
 FEED = ROOT / 'knowledge_feed.xml'
+LIBRARY_FEED = ROOT / 'library_feed.xml'   # ニュース1冊＋知識の本をまとめた入口(X4にOPDS URLを1つしか登録できない場合用)
 JST = timezone(timedelta(hours=9))
 UA = 'X4KnowledgeLibrary/1.1 (public-source educational EPUB builder)'
 GEMINI_URL = 'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent'
@@ -1787,6 +1788,19 @@ def update_feed(cfg, history):
     tmp = FEED.with_suffix('.xml.tmp')
     tmp.write_text(feed, encoding='utf-8')
     os.replace(tmp, FEED)
+    news = ('<entry><title>0000 今日のニュース</title><id>urn:uuid:c4e4cdfe-4835-5442-b3f9-a43954067a74</id>'
+            f'<updated>{timestamp}</updated><author><name>0000_X4</name></author>'
+            '<link rel="http://opds-spec.org/acquisition" type="application/epub+zip"'
+            f' href="{atom_escape(base + "/books/0000_X4_NEWS.epub")}"/></entry>')
+    library = (f'<?xml version="1.0" encoding="utf-8"?>'
+               f'<feed xmlns="http://www.w3.org/2005/Atom" xmlns:opds="http://opds-spec.org/2010/catalog">'
+               f'<id>urn:uuid:x4-all-in-one-library</id><title>X4 LIBRARY</title>'
+               f'<updated>{timestamp}</updated>'
+               f'<link rel="self" type="application/atom+xml;profile=opds-catalog;kind=acquisition"'
+               f' href="{atom_escape(base + "/library_feed.xml")}"/>{news}{entries}</feed>')
+    tmp = LIBRARY_FEED.with_suffix('.xml.tmp')
+    tmp.write_text(library, encoding='utf-8')
+    os.replace(tmp, LIBRARY_FEED)
 
 
 def publish(cfg, date=None):
