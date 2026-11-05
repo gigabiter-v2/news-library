@@ -154,6 +154,7 @@ class TempEnv(unittest.TestCase):
         kd.ARCHIVE = kd.DATA / 'published'
         kd.BOOKS = self.root / 'books' / 'knowledge'
         kd.FEED = self.root / 'knowledge_feed.xml'
+        kd.LIBRARY_FEED = self.root / 'library_feed.xml'
         kd._ROBOTS.clear()
         kd.Gemini.BLOCKED.clear()
 
@@ -1309,6 +1310,14 @@ class PublishTests(TempEnv):
     def test_no_stock_means_no_book(self):
         self.assertIsNone(kd.publish(self.cfg(), '2026-11-03'))
         self.assertFalse(kd.BOOKS.exists() and list(kd.BOOKS.glob('*.epub')))
+
+    def test_library_feed_has_news_first_then_knowledge_books(self):
+        kd.update_feed(CFG, [{'date': '2026-11-03', 'title': 'T', 'uid': 'urn:uuid:a', 'timestamp': '2026-11-03T06:00:00+09:00', 'filename': 'a.epub'}])
+        ns = {'a': 'http://www.w3.org/2005/Atom'}
+        root = ET.fromstring(kd.LIBRARY_FEED.read_bytes())
+        hrefs = [e.find('a:link', ns).get('href') for e in root.findall('a:entry', ns)]
+        self.assertTrue(hrefs[0].endswith('/books/0000_X4_NEWS.epub'))
+        self.assertTrue(hrefs[1].endswith('/books/knowledge/a.epub'))
 
     def test_feed_failure_keeps_stock_and_history(self):
         self.stock('bio1', 'biography')
