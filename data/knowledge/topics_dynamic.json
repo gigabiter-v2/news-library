@@ -22,5 +22,29 @@
     "category": "business",
     "title": "医療器材の「サステナビリティ」：使い捨て製品から再利用への回帰が中材運営に与える影響",
     "kind": "explanation"
+  },
+  {
+    "id": "extra_outsourcing_ca2786e181ad",
+    "category": "outsourcing",
+    "title": "「偽装請負」を防ぐ指揮命令の実務：病院中材受託における労働者派遣法と請負適正化の境界線",
+    "kind": "explanation"
+  },
+  {
+    "id": "extra_outsourcing_6874d0981995",
+    "category": "outsourcing",
+    "title": "地域医療構想と中材の広域集約化：自治体病院再編に伴う共同滅菌センターの採算と運営課題",
+    "kind": "explanation"
+  },
+  {
+    "id": "extra_outsourcing_d73184a9fc78",
+    "category": "outsourcing",
+    "title": "手術室回転時間（TAT）と成果連動型契約：滅菌受託におけるSLA設計とインセンティブの現実",
+    "kind": "explanation"
+  },
+  {
+    "id": "extra_outsourcing_e172b913049a",
+    "category": "outsourcing",
+    "title": "滅菌受託企業の業界再編とM&A：大手事業者への集約が病院の調達・価格交渉力に与える影響",
+    "kind": "explanation"
   }
 ]
