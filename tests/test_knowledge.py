@@ -1389,6 +1389,19 @@ class ListingPageTests(unittest.TestCase):
         self.assertFalse(kd.is_listing_page('https://ja.wikipedia.org/wiki/%E6%BB%85%E8%8F%8C', '滅菌 - Wikipedia'))
 
 
+class TopicRotationTests(unittest.TestCase):
+    def test_categories_alternate_so_biography_is_not_starved(self):
+        cfg = {'weekday_categories': ['hospital', 'biography', 'business', 'outsourcing', 'cases', 'management', 'discovery'],
+               'topics': [{'id': f'{c}{i}', 'category': c} for c in ['hospital', 'biography', 'business', 'outsourcing', 'cases', 'management', 'discovery'] for i in range(3)]}
+        first = [t['category'] for t in list(kd.next_topics(cfg, set()))[:7]]
+        self.assertEqual(len(set(first)), 7)
+        self.assertIn('biography', first[:2] + first[2:])
+        used = {f'business{i}' for i in range(3)}
+        ids = [t['id'] for t in kd.next_topics(cfg, used)]
+        self.assertNotIn('business0', ids)
+        self.assertEqual(len(ids), len(set(ids)))
+
+
 if __name__ == '__main__':
     unittest.main()
 
