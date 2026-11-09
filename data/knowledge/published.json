@@ -30,5 +30,13 @@
     "title": "キャッシュ・フロー計算書の読み方：黒字でも資金が足りなくなる理由",
     "uid": "urn:uuid:ac55bab8-6d6d-5a81-b1db-f6cac1c491cb",
     "filename": "0000_X4_20261108_biz_cashflow.epub"
+  },
+  {
+    "date": "2026-11-09",
+    "timestamp": "2026-11-09T10:42:18.196020+09:00",
+    "topic_id": "hosp_reprocessing_flow",
+    "title": "医療機器の清浄・消毒・滅菌における処理工程と管理基準の実際",
+    "uid": "urn:uuid:4ccc7b05-37ee-5330-9ba6-8f983bc0392a",
+    "filename": "0000_X4_20261109_hosp_reprocessing_flow.epub"
   }
 ]
