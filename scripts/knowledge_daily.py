@@ -1307,12 +1307,16 @@ def next_topics(cfg, used_ids):
         cat = cfg['weekday_categories'][(now() + timedelta(days=d)).weekday()]
         if cat not in seen_categories:
             seen_categories.append(cat)
-    for cat in seen_categories:
-        for t in topics:
-            if t['category'] == cat and t['id'] not in used_ids:
-                yield t
+    # ジャンルを順番に1題材ずつ回す。先頭のジャンルが失敗し続けても、他のジャンル(伝記など)が後回しにならない。
+    queues = [[t for t in topics if t['category'] == cat and t['id'] not in used_ids] for cat in seen_categories]
+    given = set()
+    for rank in range(max([len(q) for q in queues] or [0])):
+        for q in queues:
+            if rank < len(q):
+                given.add(q[rank]['id'])
+                yield q[rank]
     for t in topics:
-        if t['id'] not in used_ids:
+        if t['id'] not in used_ids and t['id'] not in given:
             yield t
 
 
