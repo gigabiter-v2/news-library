@@ -1551,7 +1551,14 @@ class RedesignTests(TempEnv):
         self.assertIn('【沿革】1948年に設立された。', page['text'])
         self.assertLess(page['text'].index('沿革'), page['text'].index('【製品】'))
         self.assertNotIn('【脚注】', page['text'])
-        self.assertLessEqual(len(page['text']), 14000)
+        self.assertLessEqual(len(page['text']), kd.SOURCE_TEXT_MAX)
+
+    def test_fact_extraction_asks_for_enough_material(self):
+        ai = mock.Mock()
+        ai.ask.return_value = {'facts': []}
+        with self.assertRaises(ValueError):
+            kd.extract_facts({'title': 'T'}, [], ai)
+        self.assertIn('40〜60個', ai.ask.call_args[0][0])
 
     def test_wikipedia_subsections_inherit_parent_priority(self):
         extract = ('松下幸之助は日本の実業家である。' * 20 + '\n== エピソード ==\n' + '逸話。' * 4000
