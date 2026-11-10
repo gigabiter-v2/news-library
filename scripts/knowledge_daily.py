@@ -23,7 +23,7 @@ import zipfile
 from datetime import datetime, timedelta, timezone
 from html import escape as html_escape
 from pathlib import Path
-from urllib.parse import quote as url_quote, urlparse, urljoin
+from urllib.parse import quote as url_quote, unquote, urlparse, urljoin
 from urllib.robotparser import RobotFileParser
 from xml.sax.saxutils import escape as xml_escape
 
@@ -343,9 +343,50 @@ def robots_allows(url):
     return _robots_for(f'{p.scheme}://{p.netloc}').can_fetch(UA, url)
 
 
+WIKI_PRIORITY_RE = re.compile(r'(歴史|沿革|来歴|生涯|経歴|略歴|生い立ち|創業|設立|概要|概説|経営|事業)')
+WIKI_SKIP_RE = re.compile(r'(脚注|出典|参考文献|関連項目|外部リンク|注釈|関連書籍|登場作品|演じた人物|ギャラリー)')
+
+
+def fetch_wikipedia(url):
+    """ja.wikipediaの記事をAPIのプレーンテキストで取る。HTMLだと大きな記事が上限超えになり、
+    先頭14000字で切ると企業・人物の「歴史・沿革」の節が落ちるため、それらの節を前に並べ替えてから切る。"""
+    path = urlparse(url).path
+    if not path.startswith('/wiki/'):
+        raise ValueError('Wikipedia記事のURLではありません')
+    title = unquote(path[len('/wiki/'):]).replace('_', ' ')
+    data = wiki_api({'action': 'query', 'prop': 'extracts', 'explaintext': 1, 'exsectionformat': 'wiki',
+                     'titles': title, 'redirects': 1})
+    page = (data.get('query', {}).get('pages') or [{}])[0]
+    extract = page.get('extract') if isinstance(page, dict) else None
+    if not isinstance(extract, str) or len(extract) < 250:
+        raise ValueError('Wikipedia本文を取得できませんでした')
+    parts = re.split(r'\n(={2,6})\s*(.+?)\s*\1\n', '\n' + extract)
+    lead, sections, parent = parts[0], [], ''
+    for i in range(1, len(parts) - 2, 3):
+        level, heading, body = len(parts[i]), parts[i + 1], parts[i + 2]
+        if level == 2:
+            parent = heading
+        # 小見出し(「生い立ち」「会社創業」など)は、親の見出し(「経歴」「歴史」)の扱いを引き継ぐ
+        priority = bool(WIKI_PRIORITY_RE.search(heading) or (level > 2 and WIKI_PRIORITY_RE.search(parent)))
+        skip = bool(WIKI_SKIP_RE.search(heading) or (level > 2 and WIKI_SKIP_RE.search(parent)))
+        if body.strip() and not skip:
+            sections.append((heading, body, priority))
+    ordered = [row for row in sections if row[2]] + [row for row in sections if not row[2]]
+    text = lead + ' ' + ' '.join(f'【{h}】{b}' for h, b, _ in ordered)
+    text = re.sub(r'\s+', ' ', text).strip()
+    real = str(page.get('title') or title)
+    return {'url': 'https://ja.wikipedia.org/wiki/' + url_quote(real.replace(' ', '_'), safe=''),
+            'title': f'{real} - Wikipedia', 'text': text[:14000], 'domain': 'ja.wikipedia.org'}
+
+
 def fetch_public(url, max_redirects=5):
     if not safe_url(url):
         raise ValueError('公開HTTPS以外のURLは取得しません')
+    if (urlparse(url).hostname or '').lower() == 'ja.wikipedia.org' and urlparse(url).path.startswith('/wiki/'):
+        try:
+            return fetch_wikipedia(url)
+        except Exception as exc:
+            log(f'Wikipedia APIで本文を取れないため通常取得に切り替えます: {type(exc).__name__}')
     current = url
     for _ in range(max_redirects + 1):
         if not robots_allows(current):
@@ -867,10 +908,12 @@ def normalized_learning_items(article):
     """学び・関連用語にも出典IDを要求する。"""
     takeaways = article.get('takeaways')
     terms = article.get('terms')
-    if not isinstance(takeaways, list) or len(takeaways) != 3:
-        raise ValueError('重要ポイントは根拠ID付きで3つ必要')
-    if not isinstance(terms, list) or not 3 <= len(terms) <= 5:
-        raise ValueError('関連用語は根拠ID付きで3〜5個必要')
+    if not isinstance(takeaways, list) or not 1 <= len(takeaways) <= 3:
+        raise ValueError('重要ポイントは根拠ID付きで1〜3つ必要')
+    if terms is None:
+        terms = []
+    if not isinstance(terms, list) or len(terms) > 5:
+        raise ValueError('関連用語は根拠ID付きで5個まで')
     for t in takeaways:
         if not isinstance(t, dict) or not isinstance(t.get('text'), str) or not t['text'].strip():
             raise ValueError('重要ポイントの本文が不正')
@@ -997,13 +1040,53 @@ def strip_stray_numbers(article, facts):
     return removed
 
 
+HEADING_NUMBER_RE = re.compile(r'\d[\d,.]*\s*(?:年代|年度|年頃|年|月|日|%|％|万|億|円|人|社|件|倍|回|代)?')
+
+
+def repair_structure(article, facts, topic=None):
+    """本全体を不合格にせず直せるものを直す。直した内容を文字列で返す(ログ用)。
+    見出し・書名に事実カードにない数字があれば数字の部分を消す(書名は題材名に戻す)。
+    数字の混じった学び・用語は項目ごと外す。空になった章は外す。新しい事実は一切足さない。"""
+    notes = []
+    if not isinstance(article, dict):
+        return notes
+    known = set().union(*(numbers_in(f['claim']) for f in facts)) if facts else set()
+
+    def stray(text):
+        return any(len(n.replace('.', '')) >= 2 and n not in known for n in numbers_in(str(text)))
+
+    if topic and (stray(article.get('title', '')) or len(str(article.get('title', '')).strip()) < 6):
+        article['title'] = topic['title']
+        notes.append('書名を題材名に戻しました')
+    chapters = [c for c in article.get('chapters') or [] if isinstance(c, dict) and c.get('paragraphs')]
+    for c in chapters:
+        heading = str(c.get('heading', ''))
+        if stray(heading):
+            fixed = HEADING_NUMBER_RE.sub('', heading)
+            fixed = re.sub(r'^[のにでと、・：:\s]+|[のにでと、・：:\s]+$', '', fixed)
+            c['heading'] = fixed if len(fixed) >= 2 else '資料に残る記録'
+            notes.append(f'見出しの数字を外しました: {heading[:20]}')
+        elif not heading.strip():
+            c['heading'] = '資料に残る記録'
+    article['chapters'] = chapters
+    for key in ('takeaways', 'terms'):
+        items = article.get(key)
+        if isinstance(items, list):
+            kept = [t for t in items if isinstance(t, dict)
+                    and not stray(str(t.get('text', '')) + ' ' + str(t.get('term', '')) + ' ' + str(t.get('meaning', '')))]
+            if len(kept) < len(items):
+                notes.append(f'{key}から数字の合わない項目を{len(items) - len(kept)}件外しました')
+            article[key] = kept
+    return notes
+
+
 def validate_article(article, facts, cfg, demo=False):
     if not isinstance(article, dict) or len(str(article.get('title', ''))) < 6:
         raise ValueError('書名が不正')
     fact_map = {f['id']: f for f in facts}
     blocks = [article.get('hook'), article.get('ending')]
     chapters = article.get('chapters')
-    if not isinstance(chapters, list) or not 3 <= len(chapters) <= 9:
+    if not isinstance(chapters, list) or not 2 <= len(chapters) <= 9:
         raise ValueError('章数が不正')
     takeaways, terms = normalized_learning_items(article)
     blocks.extend(takeaways)
@@ -1051,6 +1134,14 @@ def write_article(topic, sources, facts, ai, cfg, feedback=None, _retry=True):
     domain_hint = ('看護師向けの基本的な医学知識は不要。中材では病院側と受託会社側の仕事・経営に注目。'
                    if topic.get('category') in ('hospital', 'outsourcing') else
                    'テーマと関係のない業界・事例(病院や中材など)に話を広げない。')
+    if topic['kind'] == 'story':
+        # 物語型は「自由に書かせて後で削る」と、つなぎ・評価の文が大量に削られて本が成り立たなくなる。
+        # 先に事実を年代順に並べ、1文=1事実で書かせ、面白さは構成(問い・章立て・具体的な出来事)で出す。
+        domain_hint += ('【物語の書き方】まずファクトを年代・出来事の順に並べ、その順に章を分ける。'
+                        'factの段落では1文ごとに1つのファクトを言い換えて書き、文と文のつなぎは「その後」「同じ年」「翌年」など、'
+                        'ファクトの年号から言える言葉だけにする。人物の気持ち・評価・成功や失敗の意味づけ・「～を築き上げた」等のまとめは'
+                        'factの段落に書かない(書くなら短いinterpretation段落で「～と考えられる」)。'
+                        '面白さは、冒頭の問い・章の並べ方・具体的な出来事(数字・固有名詞)で出す。')
     prompt = (
         'あなたは資料に厳密なノンフィクション編集者。以下の検証済みファクト以外から事実を追加しない。'
         'このファクトは実在する取得資料の一致箇所から抽出してある。創作の会話・心情・数字・架空事例は厳禁。'
@@ -1069,7 +1160,7 @@ def write_article(topic, sources, facts, ai, cfg, feedback=None, _retry=True):
         '数字・年号はファクトに書かれたものだけを算用数字で使い、ファクトにない数字は書かない。'
         + domain_hint +
         f'ねらい: {goal}。本文は{size} (ファクトの内容を丁寧に言い換えて展開するのは構わないが、ファクトにない内容での水増しは禁止)。'
-        '見出し3〜6、各章に2〜5段落。冒頭は90〜200字、結びは150〜250字。'
+        '見出し3〜6(見出しには年号や数字を入れない)、各章に2〜5段落。冒頭は90〜200字、結びは150〜250字。'
         '各段落には必ず根拠になったファクトIDを1個以上fact_idsに入れる。'
         '原稿末尾に学び3点と関連用語3〜5語。学び・用語の説明も根拠ID必須。'
         '以下のJSON構造で回答。余計な項目は不要。'
@@ -1088,6 +1179,8 @@ def write_article(topic, sources, facts, ai, cfg, feedback=None, _retry=True):
     article = ai.ask(prompt)
     # 事実カードに根拠表現のない文(評価・因果・補足)を機械的に取り除く。AIの校閲に頼らない下限。
     removed = trim_unsupported(article, facts)
+    for note in repair_structure(article, facts, topic):
+        log('  修復: ' + note)
     if removed:
         log(f'事実カードに根拠表現のない文を{len(removed)}文、本文から機械的に削除しました')
         for sentence in removed[:12]:
@@ -1115,15 +1208,80 @@ def write_article(topic, sources, facts, ai, cfg, feedback=None, _retry=True):
 
 class AuditFailure(ValueError):
     def __init__(self, issues):
-        self.issues = [str(i) for i in issues]
+        self.quotes = []
+        self.issues = []
+        for i in issues:
+            if isinstance(i, dict):
+                quote = str(i.get('quote') or i.get('sentence') or '').strip()
+                self.issues.append(f'「{quote[:60]}」: {str(i.get("reason", ""))[:120]}')
+                if quote:
+                    self.quotes.append(quote)
+            else:
+                self.issues.append(str(i))
         super().__init__('校閲不合格: ' + '; '.join(self.issues[:3]))
+
+
+def remove_flagged_sentences(article, quotes, topic=None):
+    """校閲役が引用した問題の文を本文から取り除く(書き直さない＝新しい誤りを入れない)。
+    戻り値: (取り除いた文のリスト, 本文に見つからなかった引用の数)。"""
+    def key(t):
+        return re.sub(r'[\s「」『』""\'。、．，,.!！?？…]', '', normalize(t))
+
+    targets = [key(q) for q in quotes if len(key(q)) >= 8]
+    removed, hit = [], set()
+
+    def matches(sentence):
+        ks = key(sentence)
+        if len(ks) < 4:
+            return None
+        for i, q in enumerate(targets):
+            head = q[:24]
+            if head in ks or (len(ks) >= 8 and ks[:24] in q):
+                return i
+        return None
+
+    def clean(block, field='text', allow_empty=True):
+        if not isinstance(block, dict) or not isinstance(block.get(field), str):
+            return True
+        sentences = split_sentences(block[field])
+        keep = []
+        for sentence in sentences:
+            i = matches(sentence)
+            if i is None:
+                keep.append(sentence)
+            else:
+                hit.add(i)
+                removed.append(sentence)
+        if len(keep) == len(sentences):
+            return True
+        if not keep and not allow_empty:
+            return True
+        block[field] = ''.join(keep)
+        return bool(keep)
+
+    for chapter in article.get('chapters') or []:
+        if isinstance(chapter, dict):
+            chapter['paragraphs'] = [p for p in chapter.get('paragraphs') or [] if clean(p)]
+    article['chapters'] = [c for c in article.get('chapters') or [] if isinstance(c, dict) and c.get('paragraphs')]
+    for name in ('hook', 'ending'):
+        block = article.get(name)
+        before = block.get('text') if isinstance(block, dict) else None
+        if not clean(block, allow_empty=True) and isinstance(block, dict):
+            # 冒頭・結びが丸ごと問題なら、事実を述べない定型文に置き換える(根拠IDはそのまま)
+            block['text'] = (f'「{(topic or {}).get("title", article.get("title", ""))}」について、資料で確認できた事実をたどる。'
+                             if name == 'hook' else '以上が、取得した資料で確認できた事実である。')
+    for name, field in (('takeaways', 'text'), ('terms', 'meaning')):
+        items = article.get(name)
+        if isinstance(items, list):
+            article[name] = [t for t in items if clean(t, field)]
+    return removed, len(targets) - len(hit)
 
 
 def audit_article(article, facts, ai):
     cards = '\n'.join(f'{f["id"]} {f["claim"]} / 原文: {f["evidence_excerpt"]}' for f in facts)
     paragraphs = []
     review_blocks = ([article['hook']] + [p for c in article['chapters'] for p in c['paragraphs']]
-                     + [article['ending']] + article['takeaways'] + article['terms'])
+                     + [article['ending']] + list(article.get('takeaways') or []) + list(article.get('terms') or []))
     for block in review_blocks:
         paragraphs.append(f'種別={block.get("kind", "fact")} 根拠ID={block["fact_ids"]} '
                           f'文章={block.get("text", block.get("meaning", ""))}')
@@ -1139,7 +1297,9 @@ def audit_article(article, facts, ai):
         '読者が面白く読めても事実不足なら不合格。編集者に甘くしない。'
         '根拠カード自体の正確性を保証できるわけではない点も考慮。'
         '不合格の場合、issuesには問題の文章の冒頭と理由を具体的に書く。'
-        'JSONのみ: {"pass":true,"issues":[]} または {"pass":false,"issues":["...",...]}\n'
+        'issuesの各項目では、問題の文を原稿から一字一句そのまま1文だけquoteに写し、reasonに理由を書く。'
+        'JSONのみ: {"pass":true,"issues":[]} または '
+        '{"pass":false,"issues":[{"quote":"問題の文(原稿のまま)","reason":"理由"},...]}\n'
         '事実カード:\n' + cards + '\n原稿:\n' + '\n'.join(paragraphs)
     )
     verdict = ai.ask(prompt)
@@ -1276,7 +1436,8 @@ def prepare_one(topic, cfg, ai, auditor=None):
             article = write_article(topic, sources, facts, ai, cfg)
             checkpoint(article=article, article_audited=False)
         if not ck.get('article_audited'):
-            for round_ in range(2):
+            rewritten = False
+            for round_ in range(3):
                 auditor.avoid = set(ai.used_models)
                 try:
                     audit_article(article, facts, auditor)
@@ -1284,10 +1445,27 @@ def prepare_one(topic, cfg, ai, auditor=None):
                 except AuditFailure as exc:
                     log(f'校閲指摘({round_ + 1}回目): ' + '; '.join(exc.issues[:3]))
                     dbg.setdefault('article_issues', []).append(exc.issues[:6])
-                    if round_ == 1:
+                    removed, missed = remove_flagged_sentences(article, exc.quotes, topic) if exc.quotes else ([], 1)
+                    if removed and not missed:
+                        # 指摘された文だけを消す。書き直さないので新しい誤りは入らない。残りの文は今回の校閲で指摘されなかった文。
+                        log(f'  指摘された{len(removed)}文を本文から削除しました')
+                        for sentence in removed[:8]:
+                            log('  削除: ' + sentence[:70])
+                        article['audit_removed_sentences'] = (article.get('audit_removed_sentences') or []) + removed[:30]
+                        repair_structure(article, facts, topic)
+                        validate_article(article, facts, cfg)
+                        checkpoint(article=article, article_audited=False)
+                        if round_ >= 1:
+                            break  # 2回の校閲で指摘された文はすべて除いた。残りは2回とも指摘されなかった文
+                        continue
+                    if rewritten or round_ == 2:
                         raise
+                    # 指摘の文を本文から特定できないときだけ、1回書き直す
                     article = write_article(topic, sources, facts, ai, cfg, feedback='\n'.join(exc.issues[:6]))
+                    rewritten = True
                     checkpoint(article=article, article_audited=False)
+            else:
+                raise AuditFailure(['校閲の回数上限に達しました'])
             checkpoint(article_audited=True)
     except GeminiError:
         log(f'Geminiを使えず中断: 成功した工程は保存済みです。次回そこから再開します '
@@ -1541,6 +1719,9 @@ def jp_font(size=20):
     raise RuntimeError('日本語描画用フォントが見つかりません。fonts-noto-cjk をインストールしてください')
 
 
+NO_LINE_START = set('、。，．,.）)」』】”’・ー：:；;！!？?％%')
+
+
 def lines(text, max_chars=17):
     """日本語の横幅をおおむね制限。読めない超小文字は作らない。"""
     text = str(text).strip()
@@ -1548,7 +1729,7 @@ def lines(text, max_chars=17):
     result, current, width = [], '', 0.0
     for ch in text:
         w = 0.52 if ord(ch) < 128 else 1.0
-        if current and width + w > max_chars:
+        if current and width + w > max_chars and ch not in NO_LINE_START:  # 句読点・閉じ括弧は行頭に置かない(1字ぶらさげ)
             result.append(current)
             current, width = ch, w
         else:
@@ -1558,109 +1739,134 @@ def lines(text, max_chars=17):
     return result
 
 
+CATEGORY_LABEL = {'hospital': '中材・病院運営', 'outsourcing': '中材・受託会社の経営', 'biography': '人物と創業',
+                  'business': 'ビジネス用語', 'cases': '企業の成功と失敗', 'management': 'マネジメント',
+                  'discovery': '科学・歴史'}
+
+
 def hero_label(heading, width=19):
-    """表紙図の題名ラベル。途中で切れたまま見せない(コロン前の主題を優先し、長ければ「…」で省略する)。"""
-    text = str(heading).strip()
-    if len(lines(text, width)) <= 1:
-        return text
-    head = re.split(r'[：:]', text, maxsplit=1)[0].strip()
-    if 4 <= len(head) and len(lines(head, width)) == 1:
-        return head
-    first = lines(text, width - 1)[0]
-    return first + '…'
+    """題名を途中で切らずに折り返した行のリスト(最大5行)。"""
+    rows = lines(str(heading).strip(), width)
+    if len(rows) <= 5:
+        return rows
+    return rows[:4] + [rows[4][:width - 1] + '…']
 
 
-def draw_hero(category, heading):
-    """実在人物/製品の形を捏造せず、テーマを象徴するオリジナル線画。"""
-    img = Image.new('RGB', (448, 286), 'white')
+def draw_hero(category, heading, meta=''):
+    """表紙。値を持たない飾りのグラフは描かない(事実の本で誤解を招くため)。分野・題名・読了時間だけを示す。"""
+    font_size, width = (26, 15) if len(lines(heading, 15)) <= 4 else (22, 18)
+    rows = hero_label(heading, width)
+    W = 448
+    H = 120 + len(rows) * (font_size + 12) + 40
+    img = Image.new('L', (W, H), 255)
     d = ImageDraw.Draw(img)
-    d.rectangle((9, 9, 438, 275), outline='black', width=3)
-    d.line((30, 38, 418, 38), fill='black', width=3)
-    d.text((32, 15), 'X4 / KNOWLEDGE', font=jp_font(13), fill='black')
-    cx, cy = 224, 132
-    if category in ('hospital', 'outsourcing'):
-        # 清潔な器械トレー・工程を抽象化。実機の構造を表す図ではない。
-        d.rounded_rectangle((101, 99, 346, 195), radius=9, outline='black', width=5)
-        d.line((112, 117, 335, 117), fill='black', width=3)
-        for x in (151, 224, 297):
-            d.ellipse((x-18, 133, x+18, 169), outline='black', width=4)
-            d.line((x, 125, x, 177), fill='black', width=3)
-        d.line((125, 205, 322, 205), fill='black', width=3)
-    elif category in ('biography', 'cases'):
-        # ノンフィクションの本と、歴史の時間軸を象徴する線画。
-        d.polygon([(103, 177), (178, 163), (222, 185), (222, 91), (178, 75), (103, 91)], outline='black')
-        d.polygon([(222, 91), (265, 75), (342, 91), (342, 177), (265, 163), (222, 185)], outline='black')
-        d.line((222, 91, 222, 185), fill='black', width=4)
-        for y in (110, 128, 146):
-            d.line((120, y, 191, y-7), fill='black', width=2)
-            d.line((253, y-7, 327, y), fill='black', width=2)
-    else:
-        # データ点と棒グラフ：測定や比較の象徴。値は一切主張しない。
-        d.line((116, 188, 334, 188), fill='black', width=4)
-        d.line((116, 188, 116, 88), fill='black', width=4)
-        for x, h in [(152, 41), (214, 72), (276, 90)]:
-            d.rectangle((x, 188-h, x+34, 187), outline='black', width=4)
-        d.line((130, 99, 169, 87, 225, 111, 301, 75), fill='black', width=3)
-    d.line((30, 233, 418, 233), fill='black', width=2)
-    d.text((32, 244), hero_label(heading), font=jp_font(17), fill='black')
-    return img.convert('1', dither=Image.Dither.NONE)
+    d.rectangle((6, 6, W - 7, H - 7), outline=0, width=3)
+    d.text((28, 22), 'X4 KNOWLEDGE', font=jp_font(14), fill=0)
+    label = CATEGORY_LABEL.get(category, '')
+    if label:
+        tw = d.textlength(label, font=jp_font(16))
+        d.rectangle((W - 36 - tw - 14, 16, W - 28, 44), outline=0, width=2)
+        d.text((W - 36 - tw - 7, 20), label, font=jp_font(16), fill=0)
+    d.line((28, 56, W - 28, 56), fill=0, width=3)
+    y = 78
+    for row in rows:
+        d.text((28, y), row, font=jp_font(font_size), fill=0)
+        y += font_size + 12
+    d.line((28, y + 8, W - 28, y + 8), fill=0, width=2)
+    if meta:
+        d.text((28, y + 18), meta, font=jp_font(15), fill=0)
+    return img.point(lambda v: 0 if v < 128 else 255)
 
 
-def draw_fact_diagram(facts):
-    """検証済み事実カードから「論理関係を勝手に付けない」図表を生成。"""
-    selected = facts[:3]
-    W, H = 448, 408
-    img = Image.new('RGB', (W, H), 'white')
+NUMBER_UNIT_RE = re.compile(r'(?<![A-Za-z0-9.])(?<![A-Za-z] )\d[\d,.]*(?:\s*[〜～~\-－]\s*\d[\d,.]*)?\s*(万円|億円|兆円|万個|万台|万人|円|%|％|℃|度|気圧|分|秒|時間|日|か月|ヶ月|カ月|年|倍|回|人|件|個|台|社|店|銭|kPa|MPa|mm|cm|kg)')
+
+
+def _text_block(d, x0, y, text, size, width, max_rows=None):
+    rows = lines(text, width)
+    if max_rows and len(rows) > max_rows:
+        rows = rows[:max_rows - 1] + [rows[max_rows - 1][:width - 1] + '…']
+    for row in rows:
+        d.text((x0, y), row, font=jp_font(size), fill=0)
+        y += size + 8
+    return y
+
+
+def draw_card_figure(title, items, label_size=26):
+    """(見出し語, 説明文) の並びを縦に描く。説明文は省略せずに折り返す(全体が長すぎる場合だけ件数を減らす)。"""
+    W = 448
+    while items:
+        # 高さを見積もり、X4の1画面(縦長)に収まる件数にする
+        est = 76 + sum(label_size + 14 + len(lines(t, 23)) * 25 + 22 for _, t in items)
+        if est <= 1050 or len(items) == 1:
+            break
+        items = items[:-1]
+    H = max(200, 76 + sum(label_size + 14 + len(lines(t, 23)) * 25 + 22 for _, t in items) + 10)
+    img = Image.new('L', (W, H), 255)
     d = ImageDraw.Draw(img)
-    d.rectangle((4, 4, W-5, H-5), outline='black', width=3)
-    d.text((24, 16), '確認できた3つのポイント', font=jp_font(21), fill='black')
-    d.line((23, 53, 423, 53), fill='black', width=3)
-    for i, f in enumerate(selected):
-        y = 71 + i * 110
-        d.rounded_rectangle((22, y, 426, y+98), radius=5, outline='black', width=2)
-        d.ellipse((33, y+15, 71, y+53), outline='black', width=3)
-        d.text((46, y+20), str(i+1), font=jp_font(18), fill='black')
-        text = lines(f['claim'], 17)
-        # 最大3行。詳細は本文参照。省略と分かるよう末尾に記号を付ける。
-        for j, line in enumerate(text[:3]):
-            if j == 2 and len(text) > 3:
-                line = line[:15] + '…'
-            d.text((86, y+11+j*26), line, font=jp_font(18), fill='black')
-    return img.convert('1', dither=Image.Dither.NONE)
+    d.rectangle((4, 4, W - 5, H - 5), outline=0, width=3)
+    d.text((22, 16), title, font=jp_font(21), fill=0)
+    d.line((22, 52, W - 22, 52), fill=0, width=3)
+    y = 66
+    for head, text in items:
+        d.text((24, y), head, font=jp_font(label_size), fill=0)
+        y += label_size + 14
+        y = _text_block(d, 40, y, text, 17, 23)
+        y += 6
+        d.line((24, y, W - 24, y), fill=0, width=1)
+        y += 16
+    return img.point(lambda v: 0 if v < 128 else 255)
 
 
 def draw_timeline(facts):
-    """年号を含む確認済み事実だけで簡易年表を作る。関係ない出来事を線で因果的につながない。"""
-    events = []
+    """年号を含む確認済み事実だけで年表を作る。年号のない事実や、因果のつながりは描かない。"""
+    events, seen = [], set()
     for f in facts:
-        years = re.findall(r'(?<!\d)(?:18\d\d|19\d\d|20\d\d)年?(?!\d)', f['claim'])
-        if years:
-            events.append((int(years[0][:4]), f))
-    years_unique = {yr for yr, _ in events}
-    if len(years_unique) < 3:
-        return draw_fact_diagram(facts)
+        years = re.findall(r'(?<!\d)(1[6-9]\d\d|20\d\d)(?=年)', f['claim'])
+        if years and years[0] not in seen:
+            seen.add(years[0])
+            events.append((int(years[0]), f))
+    if len(events) < 3:
+        return None
     events.sort(key=lambda row: row[0])
-    selected, seen = [], set()
-    for year, f in events:
-        if year not in seen:
-            selected.append((year, f))
-            seen.add(year)
-        if len(selected) == 3:
+    if len(events) > 7:  # 多すぎるときは最初・最後を残して間引く
+        step = (len(events) - 1) / 6
+        events = [events[round(i * step)] for i in range(7)]
+    return draw_card_figure('資料からたどる年表', [(f'{year}年', f['claim']) for year, f in events], label_size=24)
+
+
+def draw_key_numbers(facts, prefer_ids=()):
+    """数字を含む事実を「数字で見る要点」として示す。数字はカードに書かれたものだけ。"""
+    picked = []
+    order = [f for f in facts if f['id'] in prefer_ids] + [f for f in facts if f['id'] not in prefer_ids]
+    for f in order:
+        m = next(NUMBER_UNIT_RE.finditer(f['claim']), None)  # 単位のある数字だけ(規格番号などは拾わない)
+        if m:
+            picked.append((m.group(0).strip(), f['claim']))
+        if len(picked) >= 4:
             break
-    W,H=448,408
-    img=Image.new('RGB',(W,H),'white')
-    d=ImageDraw.Draw(img)
-    d.rectangle((4,4,W-5,H-5),outline='black',width=3)
-    d.text((24,15),'資料からたどる年表',font=jp_font(22),fill='black')
-    d.line((24,53,423,53),fill='black',width=3)
-    d.line((70,94,70,357),fill='black',width=4)
-    for i,(year,f) in enumerate(selected):
-        y=91+i*110
-        d.ellipse((60,y+6,80,y+26),fill='white',outline='black',width=4)
-        d.text((90,y),str(year)+'年',font=jp_font(22),fill='black')
-        for j,line in enumerate(lines(f['claim'],21)[:2]):
-            d.text((90,y+34+j*23),line,font=jp_font(16),fill='black')
-    return img.convert('1',dither=Image.Dither.NONE)
+    if len(picked) < 2:
+        return None
+    return draw_card_figure('数字で見る要点', picked)
+
+
+def draw_points(takeaways):
+    """学びの要点を番号付きで示す(数字の事実が少ない題材用)。"""
+    items = [(f'{i}.', t['text']) for i, t in enumerate(takeaways, 1) if isinstance(t, dict) and t.get('text')]
+    return draw_card_figure('今日の要点', items, label_size=22)
+
+
+def content_figure(obj):
+    """本の分野に合った図を1枚選ぶ。(画像, 代替テキスト) を返す。"""
+    a, facts = obj['article'], obj['facts']
+    prefer = {fid for t in a.get('takeaways') or [] for fid in t.get('fact_ids', [])}
+    if obj['topic'].get('category') in ('biography', 'cases', 'discovery', 'management') or obj['topic'].get('kind') == 'story':
+        img = draw_timeline(facts)
+        if img is not None:
+            return img, '資料に年号のある出来事を並べた年表'
+    img = draw_key_numbers(facts, prefer)
+    if img is not None:
+        return img, '資料に書かれた数字と、その意味'
+    return draw_points(a.get('takeaways') or []), '今日の要点'
 
 
 def png_bytes(img):
@@ -1733,7 +1939,7 @@ def make_epub(obj, destination, date_str):
     entries = []
     entries.append(('intro.xhtml', xhtml_document(title,
         f'<h1>{x(title)}</h1><p class="byline">{x(date_str)} / 約{max(1, round(text_size(a) / CHARS_PER_MINUTE))}分 / X4 KNOWLEDGE LIBRARY</p>'
-        f'<img src="hero.png" alt="テーマを象徴する白黒イラスト"/>'
+        f'<img src="hero.png" alt="表紙(分野と題名)"/>'
         f'<p class="lead">{x(a["hook"]["text"])}{cite_mark(a["hook"], facts)}</p>')))
     for n, chapter in enumerate(a['chapters'], 1):
         content = f'<h2>第{n}章　{x(chapter["heading"])}</h2>'
@@ -1744,9 +1950,10 @@ def make_epub(obj, destination, date_str):
                 content += f'<p>{x(p["text"])}{cite_mark(p, facts)}</p>'
         entries.append((f'chapter{n}.xhtml', xhtml_document(chapter['heading'], content)))
     closing = f'<h2>結び</h2><p>{x(a["ending"]["text"])}{cite_mark(a["ending"], facts)}</p>'
-    closing += '<h2>今日覚えたい3つのこと</h2><ol>'
+    closing += '<h2>今日覚えたいこと</h2><ol>'
     closing += ''.join(f'<li>{x(t["text"])}{cite_mark(t, facts)}</li>' for t in a['takeaways']) + '</ol>'
-    closing += '<img src="facts.png" alt="資料で確認済みの3つのポイントを示す白黒図解"/>'
+    figure, figure_alt = content_figure(obj)
+    closing += f'<img src="facts.png" alt="{x(figure_alt)}"/>'
     if a.get('terms'):
         closing += '<h2>関連用語</h2><dl>'
         for t in a['terms'][:6]:
@@ -1818,20 +2025,6 @@ def make_epub(obj, destination, date_str):
                  b'<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">'
                  b'<rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>'
                  b'</rootfiles></container>')
-    # 要点図は無関係な先頭3カードではなく、本文末尾の学びを支えるカードを優先。
-    selected_facts, chosen_ids = [], set()
-    for takeaway in a['takeaways']:
-        for fid in takeaway['fact_ids']:
-            if fid in facts and fid not in chosen_ids:
-                selected_facts.append(facts[fid])
-                chosen_ids.add(fid)
-                break
-    for f in obj['facts']:
-        if len(selected_facts) >= 3:
-            break
-        if f['id'] not in chosen_ids:
-            selected_facts.append(f)
-            chosen_ids.add(f['id'])
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_suffix('.tmp')
     with zipfile.ZipFile(temporary, 'w') as z:
@@ -1841,8 +2034,9 @@ def make_epub(obj, destination, date_str):
         z.writestr('OEBPS/toc.ncx', ncx)
         z.writestr('OEBPS/toc.xhtml', navdoc)
         z.writestr('OEBPS/style.css', css)
-        z.writestr('OEBPS/hero.png', png_bytes(draw_hero(cat, obj['topic']['title'])))
-        z.writestr('OEBPS/facts.png', png_bytes(draw_timeline(obj['facts']) if cat in ('biography','cases','management','discovery') else draw_fact_diagram(selected_facts)))
+        meta = f'約{max(1, round(text_size(a) / CHARS_PER_MINUTE))}分で読める ・ 出典{len(sources)}件'
+        z.writestr('OEBPS/hero.png', png_bytes(draw_hero(cat, title, meta)))
+        z.writestr('OEBPS/facts.png', png_bytes(figure))
         for file, content in entries:
             z.writestr('OEBPS/' + file, content)
     os.replace(temporary, destination)
@@ -1916,10 +2110,23 @@ def publish(cfg, date=None):
     day = date or now().strftime('%Y-%m-%d')
     upgrade_old_books()
     history = read_json(HISTORY, [])
-    if any(h['date'] == day for h in history):
-        log(f'{day}分は出版済み。重複配信しません')
+    per_day = max(1, int(cfg.get('publish_per_day', 1)))
+    done = sum(1 for h in history if h['date'] == day)
+    if done >= per_day:
+        log(f'{day}分は出版済み({done}冊)。重複配信しません')
         update_feed(cfg, history)
         return None
+    first = None
+    for _ in range(per_day - done):
+        out = _publish_one(cfg, day)
+        if out is None:
+            break
+        first = first or out
+    return first
+
+
+def _publish_one(cfg, day):
+    history = read_json(HISTORY, [])
     items = [(p, read_json(p, {})) for p in pending()]
     if not items:
         log('検証済みストックがありません。粗悪な本は出版しません')
@@ -1931,8 +2138,9 @@ def publish(cfg, date=None):
     selected_file, item = items[0]
     # 出版前の最終検査: 準備時の基準が変わった場合や古いストックにも、根拠表現のない補足文の除去を同じ基準で適用する。
     late = trim_unsupported(item['article'], item['facts'])
+    late += repair_structure(item['article'], item['facts'], item.get('topic'))
     if late:
-        log(f'出版前検査: 事実カードに根拠表現のない文を{len(late)}文削除しました')
+        log(f'出版前検査: 事実カードに根拠表現のない文・項目を{len(late)}件直しました')
         for sentence in late[:12]:
             log('  削除: ' + sentence[:70])
         item['article']['trimmed_sentences'] = (item['article'].get('trimmed_sentences') or []) + late[:30]
