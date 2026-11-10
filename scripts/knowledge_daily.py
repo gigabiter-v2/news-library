@@ -496,7 +496,8 @@ def wikipedia_candidates(topic, ai, per_page=8, max_external=18, found=None):
         '記事名は実在が確実なものだけを書く。厚生労働省などの官公庁、学会、大学、企業の公式サイト、信頼できる報道の資料URLは、'
         '確実に存在するものだけを任意で挙げ、推測で作らない。\n'
         '主題語は、このテーマの資料なら必ず本文に出てくる中心的な用語(例: 損益分岐点)。'
-        '複合語や造語は避け、辞書や百科事典の見出しになる一般的な単語(例: 滅菌、手術室、中央材料室)を、広い語を少なくとも1つ含めて挙げる。\n'
+        '人物や企業がテーマなら、その正式な名前(例: 本田宗一郎、富士フイルム)を最初の主題語にする。'
+        '用語や仕組みがテーマなら、辞書や百科事典の見出しになる一般的な単語(例: 滅菌、手術室、中央材料室)を挙げ、複合語や造語は避ける。\n'
         '返答はJSONのみ: {"keywords":["主題語", ...最大3件],"queries":["検索語", ...最大4件],'
         '"titles":["記事名", ...最大5件],"urls":["https://...", ...最大4件]}'
     )
@@ -1411,7 +1412,11 @@ def prepare(cfg, maximum, target, only=None):
     # 前回API制限などで途中まで進んだ題材を先に再開する。
     queue_topics.sort(key=lambda t: not work_file(t['id']).exists())
     made, tried = 0, 0
+    started = time.monotonic()
     for t in queue_topics:
+        if time.monotonic() - started > 2100:
+            log('準備の時間枠(35分)を超えたため、残りの題材は次回に回します')
+            break
         if made >= maximum or (not only and len(pending()) >= target) or tried >= maximum * 3:
             break
         tried += 1
