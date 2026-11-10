@@ -38,5 +38,13 @@
     "title": "医療機器の清浄・消毒・滅菌における処理工程と管理基準の実際",
     "uid": "urn:uuid:4ccc7b05-37ee-5330-9ba6-8f983bc0392a",
     "filename": "0000_X4_20261109_hosp_reprocessing_flow.epub"
+  },
+  {
+    "date": "2026-11-10",
+    "timestamp": "2026-11-10T09:23:22.873368+09:00",
+    "topic_id": "biz_inventory_turnover",
+    "title": "在庫回転率と運転資本：在庫が経営に与える影響のメカニズム",
+    "uid": "urn:uuid:829cae81-0db2-53df-bbf7-ecfed1c592de",
+    "filename": "0000_X4_20261110_biz_inventory_turnover.epub"
   }
 ]
