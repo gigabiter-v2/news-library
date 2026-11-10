@@ -952,6 +952,48 @@ def trim_unsupported(article, facts, minimum=SUPPORT_MIN):
         if keep and len(keep) < len(sentences):
             removed += [s for s in sentences if s not in keep]
             ending['text'] = ''.join(keep)
+    removed += strip_stray_numbers(article, facts)
+    return removed
+
+
+def strip_stray_numbers(article, facts):
+    """事実カードにない2桁以上の数字(年号・金額など)を含む文を取り除く。取り除くと段落が空になる場合は触らず、検証に任せる。"""
+    known = set().union(*(numbers_in(f['claim']) for f in facts)) if facts else set()
+
+    def stray(sentence):
+        return any(len(n.replace('.', '')) >= 2 and n not in known for n in numbers_in(sentence))
+
+    removed = []
+
+    def clean(block, last_resort_keep=True):
+        if not isinstance(block, dict) or not isinstance(block.get('text'), str):
+            return True
+        sentences = split_sentences(block['text'])
+        keep = [x for x in sentences if not stray(x)]
+        if len(keep) == len(sentences):
+            return True
+        if not keep:
+            return False
+        removed.extend(x for x in sentences if stray(x))
+        block['text'] = ''.join(keep)
+        return True
+
+    if isinstance(article, dict):
+        for chapter in article.get('chapters') or []:
+            if isinstance(chapter, dict) and isinstance(chapter.get('paragraphs'), list):
+                kept = []
+                for para in chapter['paragraphs']:
+                    before = para.get('text') if isinstance(para, dict) else None
+                    if clean(para):
+                        kept.append(para)
+                    elif isinstance(before, str):
+                        removed.extend(split_sentences(before))
+                chapter['paragraphs'] = kept
+        article['chapters'] = [c for c in article.get('chapters') or [] if not isinstance(c, dict) or c.get('paragraphs')]
+        for key in ('hook', 'ending'):
+            clean(article.get(key))
+        for block in article.get('takeaways') or []:
+            clean(block)
     return removed
 
 
