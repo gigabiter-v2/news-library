@@ -1096,6 +1096,20 @@ def repair_structure(article, facts, topic=None):
             if len(kept) < len(items):
                 notes.append(f'{key}から数字の合わない項目を{len(items) - len(kept)}件外しました')
             article[key] = kept
+    if isinstance(article.get('takeaways'), list) and not article['takeaways'] and facts:
+        # 学びが全部外れたら、本文で使った監査済み事実カードの文をそのまま学びにする(新しい内容は作らない)
+        cited = [fid for c in chapters for p in c.get('paragraphs') or [] if isinstance(p, dict)
+                 for fid in p.get('fact_ids') or []]
+        by_id = {f['id']: f for f in facts}
+        picked = []
+        for fid in cited:
+            if fid in by_id and fid not in picked:
+                picked.append(fid)
+            if len(picked) == 3:
+                break
+        article['takeaways'] = [{'text': by_id[fid]['claim'], 'fact_ids': [fid]} for fid in picked]
+        if picked:
+            notes.append('学びを事実カードの文から作り直しました')
     return notes
 
 
