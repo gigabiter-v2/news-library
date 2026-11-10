@@ -1233,7 +1233,8 @@ class EpubTests(TempEnv):
         with zipfile.ZipFile(self.build()) as z:
             for name in ('OEBPS/hero.png', 'OEBPS/facts.png'):
                 img = Image.open(io.BytesIO(z.read(name)))
-                self.assertEqual(img.mode, '1', name)
+                self.assertEqual(img.mode, 'L', name)  # X4は8bit PNGのみ正しく表示する
+                self.assertEqual(set(v for _, v in img.getcolors()) - {0, 255}, set())  # 白黒のみ
                 self.assertLessEqual(img.width, 480)
                 self.assertGreater(len(img.getcolors()), 1)  # 真っ白/真っ黒ではない
 
@@ -1414,6 +1415,27 @@ class StrayNumberTrimTests(unittest.TestCase):
         self.assertEqual(len(article['chapters'][0]['paragraphs']), 1)
         self.assertEqual(article['ending']['text'], '1948年に設立された。')
         self.assertTrue(any('1950' in x for x in removed))
+
+
+class EpubImageUpgradeTests(unittest.TestCase):
+    def test_one_bit_png_in_old_epub_becomes_8bit(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / 'old.epub'
+            img = Image.new('1', (40, 20), 1)
+            img.putpixel((3, 3), 0)
+            raw = io.BytesIO()
+            img.save(raw, format='PNG')
+            with zipfile.ZipFile(path, 'w') as z:
+                z.writestr('mimetype', 'application/epub+zip', compress_type=zipfile.ZIP_STORED)
+                z.writestr('OEBPS/hero.png', raw.getvalue())
+                z.writestr('OEBPS/a.xhtml', '<html/>')
+            self.assertTrue(kd.upgrade_epub_images(path))
+            with zipfile.ZipFile(path) as z:
+                self.assertEqual(z.namelist()[0], 'mimetype')
+                self.assertEqual(z.getinfo('mimetype').compress_type, zipfile.ZIP_STORED)
+                self.assertEqual(Image.open(io.BytesIO(z.read('OEBPS/hero.png'))).mode, 'L')
+                self.assertEqual(z.read('OEBPS/a.xhtml'), b'<html/>')
+            self.assertFalse(kd.upgrade_epub_images(path))
 
 
 if __name__ == '__main__':
