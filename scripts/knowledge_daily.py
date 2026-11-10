@@ -50,7 +50,8 @@ FEED = ROOT / 'knowledge_feed.xml'
 NEWS_FEED = ROOT / 'feed.xml'              # 既存ニュースのフィード。知識の本の項目だけを足す(ニュース項目・ニュース用スクリプトは変更しない)
 LIBRARY_FEED = ROOT / 'library_feed.xml'   # ニュース1冊＋知識の本をまとめた入口(X4にOPDS URLを1つしか登録できない場合用)
 JST = timezone(timedelta(hours=9))
-UA = 'X4KnowledgeLibrary/1.1 (public-source educational EPUB builder)'
+# WikimediaのUser-Agent方針に従い、連絡先(公開リポジトリ)を入れる。汎用的なUAは制限されやすい。
+UA = 'X4KnowledgeLibrary/1.2 (https://github.com/gigabiter-v2/news-library; personal e-reader digest)'
 GEMINI_URL = 'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent'
 # Google検索の検索結果URIは一度このホストを経由して実ページへリダイレクトされる。
 REDIRECT_HOSTS = {'vertexaisearch.cloud.google.com'}
@@ -514,12 +515,30 @@ def grounded_candidates(topic, ai):
     return candidates
 
 
+_WIKI_LAST = [0.0]
+WIKI_INTERVAL = 1.5   # 秒。続けて呼ぶと制限(429)を受けるため間隔を空ける
+
+
 def wiki_api(params):
-    """MediaWiki Action API (ja.wikipedia.org)。API利用規約に従いUser-Agentを明示する。"""
-    r = requests.get(WIKI_API, params=dict(params, format='json', formatversion='2'),
-                     headers={'User-Agent': UA}, timeout=(10, 25))
-    r.raise_for_status()
-    return r.json()
+    """MediaWiki Action API (ja.wikipedia.org)。User-Agentを明示し、間隔を空け、混雑時は待って再試行する。"""
+    for attempt in range(4):
+        wait = WIKI_INTERVAL - (time.monotonic() - _WIKI_LAST[0])
+        if wait > 0:
+            time.sleep(wait)
+        _WIKI_LAST[0] = time.monotonic()
+        r = requests.get(WIKI_API, params=dict(params, format='json', formatversion='2'),
+                         headers={'User-Agent': UA}, timeout=(10, 25))
+        if r.status_code in (429, 503) and attempt < 3:
+            try:
+                delay = float((getattr(r, 'headers', None) or {}).get('Retry-After') or 0)
+            except ValueError:
+                delay = 0
+            delay = min(60.0, delay or 10.0 * (attempt + 1))
+            log(f'Wikipedia APIが混雑(HTTP {r.status_code})。{delay:.0f}秒待って再試行します')
+            time.sleep(delay)
+            continue
+        r.raise_for_status()
+        return r.json()
 
 
 def wikipedia_candidates(topic, ai, per_page=8, max_external=18, found=None):
