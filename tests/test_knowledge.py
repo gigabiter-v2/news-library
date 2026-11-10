@@ -1554,6 +1554,20 @@ class RedesignTests(TempEnv):
         self.assertLess(page['text'].index('【門真移転】'), page['text'].index('【エピソード】'))
 
 
+class WikiApiTests(unittest.TestCase):
+    def test_retries_after_rate_limit_and_sends_contact_user_agent(self):
+        calls = []
+
+        def fake_get(url, params=None, headers=None, timeout=None):
+            calls.append(headers)
+            return FakeResponse(429 if len(calls) == 1 else 200, {'query': {}})
+
+        with mock.patch.object(kd.requests, 'get', side_effect=fake_get), mock.patch.object(kd.time, 'sleep', lambda s: None):
+            self.assertEqual(kd.wiki_api({'action': 'query'}), {'query': {}})
+        self.assertEqual(len(calls), 2)
+        self.assertIn('github.com', calls[0]['User-Agent'])
+
+
 if __name__ == '__main__':
     unittest.main()
 
