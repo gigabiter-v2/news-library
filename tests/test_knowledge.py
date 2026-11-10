@@ -1055,12 +1055,18 @@ class TrimUnsupportedTests(TempEnv):
 
 
 class HeroLabelTests(unittest.TestCase):
-    def test_label_is_never_cut_in_the_middle_of_a_title(self):
-        self.assertEqual(kd.hero_label('損益分岐点とは何か：固定費と変動費で見る利益の仕組み'), '損益分岐点とは何か')
-        self.assertEqual(kd.hero_label('短い題名'), '短い題名')
-        label = kd.hero_label('ゼンメルワイスと産褥熱手洗いをめぐる長い長い歴史のものがたり')
-        self.assertTrue(label.endswith('…'))
-        self.assertLessEqual(len(label), 19)
+    def test_title_is_wrapped_not_cut(self):
+        title = '損益分岐点とは何か：固定費と変動費で見る利益の仕組み'
+        rows = kd.hero_label(title, 15)
+        self.assertEqual(''.join(rows), title)  # 途中で切らずに全文を折り返す
+        self.assertTrue(all(len(r) <= 16 for r in rows))  # 句読点のぶら下げで1字まで超える
+        self.assertFalse(any(r[0] in '、。：' for r in rows))
+        self.assertEqual(kd.hero_label('短い題名'), ['短い題名'])
+
+    def test_hero_has_no_fake_chart_and_shows_title(self):
+        img = kd.draw_hero('business', '在庫回転率と運転資本：在庫が経営に与える影響', '約6分で読める ・ 出典4件')
+        self.assertEqual(img.mode, 'L')
+        self.assertEqual(img.width, 448)
 
 
 class ArticlePromptTests(TempEnv):
@@ -1284,14 +1290,24 @@ class PublishTests(TempEnv):
         return dict(TEST_CFG, site_base_url='https://example.github.io/repo')
 
     def test_publishes_one_per_day_and_picks_weekday_category(self):
+        cfg = dict(self.cfg(), publish_per_day=1)
         self.stock('bio1', 'biography', prepared='2026-11-01T00:00:00+09:00')
         self.stock('hosp1', 'hospital', prepared='2026-11-02T00:00:00+09:00')
-        out = kd.publish(self.cfg(), '2026-11-03')  # 火曜 = biography
+        out = kd.publish(cfg, '2026-11-03')  # 火曜 = biography
         self.assertIn('bio1', out.name)
-        self.assertIsNone(kd.publish(self.cfg(), '2026-11-03'))  # 同日の二重出版なし
+        self.assertIsNone(kd.publish(cfg, '2026-11-03'))  # 同日の二重出版なし
         self.assertTrue((kd.QUEUE / 'hosp1.json').exists())
-        out2 = kd.publish(self.cfg(), '2026-11-04')
+        out2 = kd.publish(cfg, '2026-11-04')
         self.assertIn('hosp1', out2.name)
+
+    def test_publishes_up_to_two_per_day(self):
+        cfg = dict(self.cfg(), publish_per_day=2)
+        for tid in ('bio1', 'hosp1', 'biz1'):
+            self.stock(tid, 'business')
+        kd.publish(cfg, '2026-11-03')
+        self.assertEqual(len(list(kd.BOOKS.glob('*.epub'))), 2)
+        self.assertIsNone(kd.publish(cfg, '2026-11-03'))
+        self.assertEqual(len(kd.pending()), 1)
 
     def test_feed_is_valid_opds_and_keeps_past_books(self):
         self.stock('bio1', 'biography')
@@ -1436,6 +1452,106 @@ class EpubImageUpgradeTests(unittest.TestCase):
                 self.assertEqual(Image.open(io.BytesIO(z.read('OEBPS/hero.png'))).mode, 'L')
                 self.assertEqual(z.read('OEBPS/a.xhtml'), b'<html/>')
             self.assertFalse(kd.upgrade_epub_images(path))
+
+
+class RedesignTests(TempEnv):
+    FACTS = [{'id': 'F1', 'claim': '1946年に本田技術研究所が設立された。', 'source_id': 'S1', 'evidence_excerpt': 'x'},
+             {'id': 'F2', 'claim': '1948年に本田技研工業が設立された。', 'source_id': 'S1', 'evidence_excerpt': 'x'},
+             {'id': 'F3', 'claim': '1949年にオートバイのドリームD型を発売した。', 'source_id': 'S2', 'evidence_excerpt': 'x'},
+             {'id': 'F4', 'claim': '1963年に四輪車の販売を始めた。', 'source_id': 'S2', 'evidence_excerpt': 'x'}]
+
+    def article(self):
+        return {'title': '本田宗一郎と本田技研工業の誕生',
+                'hook': {'text': '小さな研究所は、どう始まったのか。', 'fact_ids': ['F1']},
+                'chapters': [{'heading': '1950年代の挑戦', 'paragraphs': [
+                    {'kind': 'fact', 'fact_ids': ['F1', 'F2'], 'text': '1946年に本田技術研究所が設立された。その後、彼は世界一の技術者を目指して奮闘した。1948年に本田技研工業が設立された。'}]},
+                    {'heading': '四輪へ', 'paragraphs': [
+                    {'kind': 'fact', 'fact_ids': ['F4'], 'text': '1963年に四輪車の販売を始めた。'}]}],
+                'ending': {'text': '1963年に四輪車の販売を始めた。', 'fact_ids': ['F4']},
+                'takeaways': [{'text': '1946年に研究所が設立された。', 'fact_ids': ['F1']}, {'text': '1970年に何かがあった。', 'fact_ids': ['F1']}],
+                'terms': []}
+
+    def test_flagged_sentence_is_removed_without_rewrite(self):
+        art = self.article()
+        removed, missed = kd.remove_flagged_sentences(art, ['その後、彼は世界一の技術者を目指して奮闘した。'])
+        self.assertEqual(missed, 0)
+        self.assertEqual(len(removed), 1)
+        self.assertNotIn('奮闘', art['chapters'][0]['paragraphs'][0]['text'])
+        self.assertIn('1948年', art['chapters'][0]['paragraphs'][0]['text'])
+
+    def test_unknown_quote_is_reported_as_missed(self):
+        art = self.article()
+        removed, missed = kd.remove_flagged_sentences(art, ['本文にまったく存在しない文章をここに書く'])
+        self.assertEqual((removed, missed), ([], 1))
+
+    def test_hook_flagged_whole_becomes_neutral_template(self):
+        art = self.article()
+        kd.remove_flagged_sentences(art, ['小さな研究所は、どう始まったのか。'], {'title': '題材'})
+        self.assertIn('資料で確認できた事実', art['hook']['text'])
+
+    def test_repair_structure_fixes_heading_and_drops_bad_takeaway(self):
+        art = self.article()
+        notes = kd.repair_structure(art, self.FACTS, {'title': '題材名'})
+        self.assertEqual(art['chapters'][0]['heading'], '挑戦')
+        self.assertEqual(len(art['takeaways']), 1)
+        self.assertTrue(notes)
+
+    def test_structured_audit_issue_removes_sentence_instead_of_rewriting(self):
+        exc = kd.AuditFailure([{'quote': 'その後、彼は世界一の技術者を目指して奮闘した。', 'reason': 'カードにない'}])
+        self.assertEqual(exc.quotes, ['その後、彼は世界一の技術者を目指して奮闘した。'])
+        self.assertIn('カードにない', exc.issues[0])
+
+    def test_audit_prompt_asks_for_exact_quotes(self):
+        ai = mock.Mock()
+        ai.ask.return_value = {'pass': True, 'issues': []}
+        kd.audit_article(self.article(), self.FACTS, ai)
+        self.assertIn('quote', ai.ask.call_args[0][0])
+
+    def test_story_prompt_asks_one_fact_per_sentence(self):
+        ai = mock.Mock()
+        ai.ask.return_value = make_article(['F1', 'F2', 'F3', 'F4'])
+        topic = {'id': 'bio', 'title': '本田宗一郎', 'kind': 'story', 'category': 'biography'}
+        try:
+            kd.write_article(topic, [], self.FACTS, ai, dict(TEST_CFG), _retry=False)
+        except ValueError:
+            pass
+        prompt = ai.ask.call_args_list[0][0][0]
+        self.assertIn('1文ごとに1つのファクト', prompt)
+        self.assertIn('見出しには年号や数字を入れない', prompt)
+
+    def test_timeline_figure_uses_years_from_cards(self):
+        img = kd.draw_timeline(self.FACTS)
+        self.assertIsNotNone(img)
+        self.assertEqual(img.mode, 'L')
+        self.assertIsNone(kd.draw_timeline(self.FACTS[:2]))
+
+    def test_key_numbers_figure_and_fallback(self):
+        facts = [{'id': 'F1', 'claim': '高圧蒸気滅菌は121℃で20分以上行う。'}, {'id': 'F2', 'claim': '乾熱滅菌は160℃で行う。'}]
+        self.assertIsNotNone(kd.draw_key_numbers(facts))
+        self.assertEqual(kd.NUMBER_UNIT_RE.search('乾熱滅菌は160～180℃くらいで行う').group(0), '160～180℃')
+        self.assertIsNone(kd.NUMBER_UNIT_RE.search('国際規格ISO 11139では'))
+        self.assertIsNone(kd.draw_key_numbers([{'id': 'F1', 'claim': '数字のない説明。'}]))
+        obj = {'article': {'takeaways': [{'text': '要点', 'fact_ids': ['F1']}]},
+               'facts': [{'id': 'F1', 'claim': '数字のない説明。'}], 'topic': {'category': 'business', 'kind': 'explanation'}}
+        img, alt = kd.content_figure(obj)
+        self.assertEqual(alt, '今日の要点')
+
+    def test_wikipedia_text_puts_history_section_first(self):
+        extract = ('本田技研工業は日本の輸送機器メーカーである。' * 20 + '\n== 製品 ==\n' + '製品の説明。' * 3000
+                   + '\n== 沿革 ==\n1948年に設立された。\n== 脚注 ==\n注')
+        with mock.patch.object(kd, 'wiki_api', return_value={'query': {'pages': [{'title': '本田技研工業', 'extract': extract}]}}):
+            page = kd.fetch_wikipedia('https://ja.wikipedia.org/wiki/%E6%9C%AC%E7%94%B0%E6%8A%80%E7%A0%94%E5%B7%A5%E6%A5%AD')
+        self.assertIn('【沿革】1948年に設立された。', page['text'])
+        self.assertLess(page['text'].index('沿革'), page['text'].index('【製品】'))
+        self.assertNotIn('【脚注】', page['text'])
+        self.assertLessEqual(len(page['text']), 14000)
+
+    def test_wikipedia_subsections_inherit_parent_priority(self):
+        extract = ('松下幸之助は日本の実業家である。' * 20 + '\n== エピソード ==\n' + '逸話。' * 4000
+                   + '\n== 経歴 ==\n\n=== 生い立ち ===\n1894年に生まれた。\n=== 門真移転 ===\n本社を移した。')
+        with mock.patch.object(kd, 'wiki_api', return_value={'query': {'pages': [{'title': '松下幸之助', 'extract': extract}]}}):
+            page = kd.fetch_wikipedia('https://ja.wikipedia.org/wiki/X')
+        self.assertLess(page['text'].index('【門真移転】'), page['text'].index('【エピソード】'))
 
 
 if __name__ == '__main__':
