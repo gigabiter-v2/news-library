@@ -1496,6 +1496,13 @@ class RedesignTests(TempEnv):
         self.assertEqual(len(art['takeaways']), 1)
         self.assertTrue(notes)
 
+    def test_empty_takeaways_are_rebuilt_from_cited_fact_cards(self):
+        art = self.article()
+        art['takeaways'] = []
+        kd.repair_structure(art, self.FACTS, {'title': '題材名'})
+        self.assertEqual([t['fact_ids'] for t in art['takeaways']], [['F1'], ['F2'], ['F4']])
+        self.assertEqual(art['takeaways'][0]['text'], self.FACTS[0]['claim'])
+
     def test_structured_audit_issue_removes_sentence_instead_of_rewriting(self):
         exc = kd.AuditFailure([{'quote': 'その後、彼は世界一の技術者を目指して奮闘した。', 'reason': 'カードにない'}])
         self.assertEqual(exc.quotes, ['その後、彼は世界一の技術者を目指して奮闘した。'])
