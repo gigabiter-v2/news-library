@@ -1194,8 +1194,8 @@ def verify_epub(path):
                     ET.fromstring(z.read(member))
                 elif kind == 'image/png':
                     with Image.open(io.BytesIO(z.read(member))) as img:
-                        if img.mode != '1' or img.width > 600:
-                            raise ValueError(f'図版が白黒1bit・幅600px以下ではありません: {member}')
+                        if img.mode != 'L' or img.width > 600:
+                            raise ValueError(f'図版が8bitグレースケール・幅600px以下ではありません: {member}')
             for ref in opf.findall('./o:spine/o:itemref', ns):
                 if ref.get('idref') not in ids:
                     raise ValueError('spineが存在しない項目を参照しています')
@@ -1664,9 +1664,47 @@ def draw_timeline(facts):
 
 
 def png_bytes(img):
+    # X4(CrossPoint)のPNG表示は8bitのみ対応。1bit PNGは表示が崩れるため、白黒(0/255)のまま8bitグレースケールで保存する。
     out = io.BytesIO()
-    img.save(out, format='PNG', optimize=True)
+    img.convert('L').save(out, format='PNG', optimize=True)
     return out.getvalue()
+
+
+def upgrade_epub_images(path):
+    """過去に作ったEPUBの1bit PNGを8bitグレースケールに置き換える。本文は変えない。置き換えたらTrue。"""
+    with zipfile.ZipFile(path) as z:
+        members = [(info, z.read(info.filename)) for info in z.infolist()]
+    changed = False
+    fixed = []
+    for info, data in members:
+        if info.filename.lower().endswith('.png'):
+            with Image.open(io.BytesIO(data)) as img:
+                if img.mode != 'L':
+                    data = png_bytes(img)
+                    changed = True
+        fixed.append((info, data))
+    if not changed:
+        return False
+    tmp = path.with_suffix('.epub.tmp')
+    with zipfile.ZipFile(tmp, 'w') as z:
+        for info, data in fixed:
+            kind = zipfile.ZIP_STORED if info.filename == 'mimetype' else zipfile.ZIP_DEFLATED
+            z.writestr(info.filename, data, compress_type=kind)
+    os.replace(tmp, path)
+    return True
+
+
+def upgrade_old_books():
+    count = 0
+    for path in sorted(BOOKS.glob('*.epub')) if BOOKS.exists() else []:
+        try:
+            if upgrade_epub_images(path):
+                verify_epub(path)
+                count += 1
+        except Exception as ex:
+            log(f'過去の本の図版変換をスキップ: {path.name} / {type(ex).__name__}')
+    if count:
+        log(f'過去の本{count}冊の図版を、X4で表示できる形式(8bit)に変換しました')
 
 
 def x(s):
@@ -1876,6 +1914,7 @@ def add_to_news_feed(entries):
 
 def publish(cfg, date=None):
     day = date or now().strftime('%Y-%m-%d')
+    upgrade_old_books()
     history = read_json(HISTORY, [])
     if any(h['date'] == day for h in history):
         log(f'{day}分は出版済み。重複配信しません')
