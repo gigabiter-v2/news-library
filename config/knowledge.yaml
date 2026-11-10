@@ -27,6 +27,7 @@ source_min: 2                   # 独立した取得元ドメインの最低数
 source_trusted_min: 1           # うち、官公庁・学会・大学・企業公式・主要報道・事典(信頼度0〜1)の最低数。Wikipediaだけでは出版しない
 source_min_chars: 800            # Wikipedia起点の資料探しで、本文がこれより短いページ(目録レコード等)は出典にしない
 max_new_per_run: 2              # 1回の実行で新規に調べる冊数上限（APIと時間の節約）
+publish_per_day: 2              # 1日に公開する最大冊数（完成した本が溜まっていれば2冊まで出す）
 stock_target: 3                 # 常に確保しておく未公開ストック数
 max_published_in_feed: 120      # knowledge_feed.xml に載せる最大冊数
 
