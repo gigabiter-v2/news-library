@@ -344,6 +344,8 @@ def robots_allows(url):
     return _robots_for(f'{p.scheme}://{p.netloc}').can_fetch(UA, url)
 
 
+# 1資料から読む本文の上限。本の長さは「確認できた事実の量」で決まるため、短く切りすぎると本も短くなる。
+SOURCE_TEXT_MAX = 24000
 WIKI_PRIORITY_RE = re.compile(r'(歴史|沿革|来歴|生涯|経歴|略歴|生い立ち|創業|設立|概要|概説|経営|事業)')
 WIKI_SKIP_RE = re.compile(r'(脚注|出典|参考文献|関連項目|外部リンク|注釈|関連書籍|登場作品|演じた人物|ギャラリー)')
 
@@ -377,7 +379,7 @@ def fetch_wikipedia(url):
     text = re.sub(r'\s+', ' ', text).strip()
     real = str(page.get('title') or title)
     return {'url': 'https://ja.wikipedia.org/wiki/' + url_quote(real.replace(' ', '_'), safe=''),
-            'title': f'{real} - Wikipedia', 'text': text[:14000], 'domain': 'ja.wikipedia.org'}
+            'title': f'{real} - Wikipedia', 'text': text[:SOURCE_TEXT_MAX], 'domain': 'ja.wikipedia.org'}
 
 
 def fetch_public(url, max_redirects=5):
@@ -439,7 +441,7 @@ def fetch_public(url, max_redirects=5):
         text = re.sub(r'\s+', ' ', text).strip()
         if len(text) < 250:
             raise ValueError('本文を十分に抽出できませんでした')
-        return {'url': current, 'title': title[:130], 'text': text[:14000], 'domain': urlparse(current).hostname}
+        return {'url': current, 'title': title[:130], 'text': text[:SOURCE_TEXT_MAX], 'domain': urlparse(current).hostname}
     raise ValueError('リダイレクト回数上限')
 
 
@@ -763,7 +765,7 @@ def distinct_source_count(facts, sources):
 
 
 def extract_facts(topic, sources, ai, min_facts=6):
-    docs = '\n\n'.join(f'【{s["id"]}】{s["title"]}\nURL:{s["url"]}\n本文:{s["text"][:12000]}' for s in sources)
+    docs = '\n\n'.join(f'【{s["id"]}】{s["title"]}\nURL:{s["url"]}\n本文:{s["text"][:SOURCE_TEXT_MAX]}' for s in sources)
     prompt = (
         '公開資料から根拠のあるファクトカードを作る。必ずJSONで出力する。'
         '与えられた資料だけを根拠とし、推測や創作は禁止。特に人名・発言・年号・統計は厳格。'
@@ -772,7 +774,7 @@ def extract_facts(topic, sources, ai, min_facts=6):
         'evidence_excerptには必ず本文から「連続して一致する原文14〜100文字」を一字一句そのまま引用する'
         '(要約・言い換え・省略記号は禁止)。claimの数字・固有名詞は引用の中に含まれていること。'
         'テーマに直接関係する事実だけを選び、別テーマの話や一般論は作らない。'
-        '引用は校閲内部のみ。事実カードは20〜32個。資料にある定義・式・区分・数値・経緯・具体例を漏れなく拾い、'
+        '引用は校閲内部のみ。事実カードは40〜60個(資料が少なければ取れるだけ)。本の本文はこのカードだけで書くので、資料にある定義・式・区分・数値・経緯・出来事・具体例を漏れなく拾い、'
         '1つのclaimに複数の話を詰め込まず独立した事実に分け、できるだけ複数資料に分散する。'
         '複数の資料に不一致があれば、相違があることを示し断定しない。'
         'JSON: {"facts":[{"claim":"...","source_id":"S1","evidence_excerpt":"..."}, ...]}\n'
