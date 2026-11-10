@@ -1402,6 +1402,20 @@ class TopicRotationTests(unittest.TestCase):
         self.assertEqual(len(ids), len(set(ids)))
 
 
+class StrayNumberTrimTests(unittest.TestCase):
+    def test_sentences_with_numbers_not_in_cards_are_removed(self):
+        facts = [{'id': 'F1', 'claim': '1948年に会社が設立された。', 'evidence_excerpt': 'x', 'source_id': 'S1'}]
+        article = {'chapters': [{'heading': 'h', 'paragraphs': [
+            {'kind': 'fact', 'fact_ids': ['F1'], 'text': '1948年に会社が設立された。1950年に工場ができた。'},
+            {'kind': 'fact', 'fact_ids': ['F1'], 'text': '1960年だけの段落。'}]}],
+            'ending': {'text': '1948年に設立された。1950年が転機だった。', 'fact_ids': ['F1']}}
+        removed = kd.strip_stray_numbers(article, facts)
+        self.assertEqual(article['chapters'][0]['paragraphs'][0]['text'], '1948年に会社が設立された。')
+        self.assertEqual(len(article['chapters'][0]['paragraphs']), 1)
+        self.assertEqual(article['ending']['text'], '1948年に設立された。')
+        self.assertTrue(any('1950' in x for x in removed))
+
+
 if __name__ == '__main__':
     unittest.main()
 
