@@ -54,5 +54,21 @@
     "title": "松下幸之助とパナソニックの創業：小さな事業から世界的企業へ",
     "uid": "urn:uuid:b51c5dd1-e783-52c8-a22f-744d36b4c68c",
     "filename": "0000_X4_20261110_bio_matsushita.epub"
+  },
+  {
+    "date": "2026-11-11",
+    "timestamp": "2026-11-11T10:22:31.225837+09:00",
+    "topic_id": "biz_depreciation",
+    "title": "減価償却とは何か：設備投資と費用の考え方",
+    "uid": "urn:uuid:6950c4f8-90a3-5249-b502-855e6a9f824e",
+    "filename": "0000_X4_20261111_biz_depreciation.epub"
+  },
+  {
+    "date": "2026-11-11",
+    "timestamp": "2026-11-11T10:22:31.453930+09:00",
+    "topic_id": "bio_honda",
+    "title": "本田宗一郎と本田技研工業の歩み",
+    "uid": "urn:uuid:345fa2c7-40b0-5857-addf-75bda1c2747e",
+    "filename": "0000_X4_20261111_bio_honda.epub"
   }
 ]
