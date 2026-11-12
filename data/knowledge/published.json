@@ -70,5 +70,21 @@
     "title": "本田宗一郎と本田技研工業の歩み",
     "uid": "urn:uuid:345fa2c7-40b0-5857-addf-75bda1c2747e",
     "filename": "0000_X4_20261111_bio_honda.epub"
+  },
+  {
+    "date": "2026-11-12",
+    "timestamp": "2026-11-12T11:50:51.609261+09:00",
+    "topic_id": "out_spd_model",
+    "title": "SPD（院内物流管理）とは何か：受託事業者のビジネスの仕組み",
+    "uid": "urn:uuid:aef5b631-2e7b-5dd9-bb67-db2acbf8b8c2",
+    "filename": "0000_X4_20261112_out_spd_model.epub"
+  },
+  {
+    "date": "2026-11-12",
+    "timestamp": "2026-11-12T11:50:51.908459+09:00",
+    "topic_id": "case_fujifilm",
+    "title": "富士フイルムの構造転換：写真フィルム市場の激変と多角化への軌跡",
+    "uid": "urn:uuid:5f283ab8-2334-5c06-a02a-48832aec1803",
+    "filename": "0000_X4_20261112_case_fujifilm.epub"
   }
 ]
