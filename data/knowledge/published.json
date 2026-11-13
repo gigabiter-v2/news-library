@@ -86,5 +86,21 @@
     "title": "富士フイルムの構造転換：写真フィルム市場の激変と多角化への軌跡",
     "uid": "urn:uuid:5f283ab8-2334-5c06-a02a-48832aec1803",
     "filename": "0000_X4_20261112_case_fujifilm.epub"
+  },
+  {
+    "date": "2026-11-13",
+    "timestamp": "2026-11-13T11:10:08.099145+09:00",
+    "topic_id": "case_jal",
+    "title": "日本航空の経営破綻と再生の軌跡",
+    "uid": "urn:uuid:82d344d5-ee29-5f53-904d-d780883e1828",
+    "filename": "0000_X4_20261113_case_jal.epub"
+  },
+  {
+    "date": "2026-11-13",
+    "timestamp": "2026-11-13T11:10:08.327386+09:00",
+    "topic_id": "case_nintendo",
+    "title": "任天堂の変遷：伝統の花札から世界的なゲーム企業への軌跡",
+    "uid": "urn:uuid:ca08a77a-f72b-5bd6-a7cb-898d81c0cf29",
+    "filename": "0000_X4_20261113_case_nintendo.epub"
   }
 ]
