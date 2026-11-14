@@ -102,5 +102,21 @@
     "title": "任天堂の変遷：伝統の花札から世界的なゲーム企業への軌跡",
     "uid": "urn:uuid:ca08a77a-f72b-5bd6-a7cb-898d81c0cf29",
     "filename": "0000_X4_20261113_case_nintendo.epub"
+  },
+  {
+    "date": "2026-11-14",
+    "timestamp": "2026-11-14T10:59:24.716066+09:00",
+    "topic_id": "bio_toyoda",
+    "title": "豊田佐吉・喜一郎とトヨタ自動車の源流：織機から自動車への軌跡",
+    "uid": "urn:uuid:c04f05fd-9489-51aa-a8cc-ec0d2bfe5fcd",
+    "filename": "0000_X4_20261114_bio_toyoda.epub"
+  },
+  {
+    "date": "2026-11-14",
+    "timestamp": "2026-11-14T10:59:24.827558+09:00",
+    "topic_id": "disc_semmelweis",
+    "title": "ゼンメルワイスと産褥熱：手洗いをめぐる歴史と科学的変遷",
+    "uid": "urn:uuid:28f7edcb-9af7-51a3-a06f-0c862fd8440c",
+    "filename": "0000_X4_20261114_disc_semmelweis.epub"
   }
 ]
