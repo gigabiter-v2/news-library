@@ -118,5 +118,21 @@
     "title": "ゼンメルワイスと産褥熱：手洗いをめぐる歴史と科学的変遷",
     "uid": "urn:uuid:28f7edcb-9af7-51a3-a06f-0c862fd8440c",
     "filename": "0000_X4_20261114_disc_semmelweis.epub"
+  },
+  {
+    "date": "2026-11-15",
+    "timestamp": "2026-11-15T10:28:33.328033+09:00",
+    "topic_id": "disc_lister",
+    "title": "リスターと消毒法：手術の感染をどう減らしたか",
+    "uid": "urn:uuid:6bb74bae-2164-5a60-97b8-336f19b37160",
+    "filename": "0000_X4_20261115_disc_lister.epub"
+  },
+  {
+    "date": "2026-11-15",
+    "timestamp": "2026-11-15T10:28:33.526197+09:00",
+    "topic_id": "hosp_set_traceability",
+    "title": "手術器械のセット管理とトレーサビリティ：何をどう記録するのか",
+    "uid": "urn:uuid:762b0fe7-a0fd-5cfc-85d5-f17b939fa728",
+    "filename": "0000_X4_20261115_hosp_set_traceability.epub"
   }
 ]
