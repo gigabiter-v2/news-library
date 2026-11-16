@@ -134,5 +134,21 @@
     "title": "手術器械のセット管理とトレーサビリティ：何をどう記録するのか",
     "uid": "urn:uuid:762b0fe7-a0fd-5cfc-85d5-f17b939fa728",
     "filename": "0000_X4_20261115_hosp_set_traceability.epub"
+  },
+  {
+    "date": "2026-11-16",
+    "timestamp": "2026-11-16T10:34:44.902651+09:00",
+    "topic_id": "hosp_sterility_assurance",
+    "title": "滅菌の品質をどう保証するか：滅菌バリデーションとインジケータの考え方",
+    "uid": "urn:uuid:5b645f1c-efc1-5ca7-b2b6-d6b4ef159aba",
+    "filename": "0000_X4_20261116_hosp_sterility_assurance.epub"
+  },
+  {
+    "date": "2026-11-16",
+    "timestamp": "2026-11-16T10:34:45.066790+09:00",
+    "topic_id": "hosp_inhouse_vs_outsource",
+    "title": "病院における滅菌・中材業務の管理と各種滅菌手法の特性",
+    "uid": "urn:uuid:8593b5e3-3148-579e-8744-d984adb6c3e6",
+    "filename": "0000_X4_20261116_hosp_inhouse_vs_outsource.epub"
   }
 ]
