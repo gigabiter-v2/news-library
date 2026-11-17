@@ -150,5 +150,21 @@
     "title": "病院における滅菌・中材業務の管理と各種滅菌手法の特性",
     "uid": "urn:uuid:8593b5e3-3148-579e-8744-d984adb6c3e6",
     "filename": "0000_X4_20261116_hosp_inhouse_vs_outsource.epub"
+  },
+  {
+    "date": "2026-11-17",
+    "timestamp": "2026-11-17T13:23:18.133796+09:00",
+    "topic_id": "bio_shibusawa",
+    "title": "渋沢栄一が歩んだ近代日本の産業形成と社会事業の道程",
+    "uid": "urn:uuid:9b4a051f-868f-51b2-ac8d-330023479999",
+    "filename": "0000_X4_20261117_bio_shibusawa.epub"
+  },
+  {
+    "date": "2026-11-17",
+    "timestamp": "2026-11-17T13:23:18.249171+09:00",
+    "topic_id": "out_quality_mark",
+    "title": "医療機関の機能報告制度と多様な資金調達の仕組み",
+    "uid": "urn:uuid:1f62c3b2-b09e-5c2c-9acd-fb63537a8ab4",
+    "filename": "0000_X4_20261117_out_quality_mark.epub"
   }
 ]

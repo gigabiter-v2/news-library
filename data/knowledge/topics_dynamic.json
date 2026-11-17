@@ -46,5 +46,29 @@
     "category": "outsourcing",
     "title": "滅菌受託企業の業界再編とM&A：大手事業者への集約が病院の調達・価格交渉力に与える影響",
     "kind": "explanation"
+  },
+  {
+    "id": "extra_hospital_b0070959b9ee",
+    "category": "hospital",
+    "title": "手術支援ロボット普及に伴う中材オペレーション：高額専用インスツルメントの滅菌保証と委託費用の交渉実務",
+    "kind": "explanation"
+  },
+  {
+    "id": "extra_hospital_425191ffb40c",
+    "category": "hospital",
+    "title": "自治体病院のPFI事業における中材業務：包括委託スキームにおける受託事業者の採算性と経営リスク",
+    "kind": "explanation"
+  },
+  {
+    "id": "extra_hospital_bfcf046cf120",
+    "category": "hospital",
+    "title": "院内クラスター発生時の中材BCPと契約免責：感染爆発が露呈させた受託現場の労務管理と費用負担",
+    "kind": "explanation"
+  },
+  {
+    "id": "extra_hospital_d75997c8fdab",
+    "category": "hospital",
+    "title": "滅菌現場の労働安全衛生と特化則対応：EOG・過酸化水素の漏出リスクと病院・受託会社の安全配慮義務",
+    "kind": "explanation"
   }
 ]
