@@ -182,5 +182,21 @@
     "title": "医療機関における滅菌消毒業務の法的基準と技術的要件",
     "uid": "urn:uuid:b0452e2c-9b02-5e90-95aa-f69b36f009f8",
     "filename": "0000_X4_20261118_out_legal_standard.epub"
+  },
+  {
+    "date": "2026-11-19",
+    "timestamp": "2026-11-19T12:21:40.102511+09:00",
+    "topic_id": "out_contract_quality",
+    "title": "業務委託を成功させる契約管理：病院が確認する品質基準と受託側の責任",
+    "uid": "urn:uuid:b9d85e5e-f5ff-559d-818f-653b07740a9e",
+    "filename": "0000_X4_20261119_out_contract_quality.epub"
+  },
+  {
+    "date": "2026-11-19",
+    "timestamp": "2026-11-19T12:21:40.262183+09:00",
+    "topic_id": "extra_outsourcing_ca2786e181ad",
+    "title": "「偽装請負」を防ぐ指揮命令の実務：病院中材受託における労働者派遣法と請負適正化の境界線",
+    "uid": "urn:uuid:5d2899a5-cc80-5c50-82b4-6dba98e8fa4f",
+    "filename": "0000_X4_20261119_extra_outsourcing_ca2786e181ad.epub"
   }
 ]
