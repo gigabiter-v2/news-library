@@ -214,5 +214,21 @@
     "title": "セブン-イレブン・ジャパンの設立とコンビニエンスストアの定着",
     "uid": "urn:uuid:9219cc6d-d4ab-5092-bc89-ac7cd86b1978",
     "filename": "0000_X4_20261120_case_seven.epub"
+  },
+  {
+    "date": "2026-11-21",
+    "timestamp": "2026-11-21T11:54:33.384929+09:00",
+    "topic_id": "disc_nightingale",
+    "title": "ナイチンゲールと統計：病院の衛生と数字の関係",
+    "uid": "urn:uuid:587b9991-3014-5b03-b55e-348c05c954ac",
+    "filename": "0000_X4_20261121_disc_nightingale.epub"
+  },
+  {
+    "date": "2026-11-21",
+    "timestamp": "2026-11-21T11:54:33.470741+09:00",
+    "topic_id": "bio_sony",
+    "title": "ソニーの歩みと創業者たちの軌跡",
+    "uid": "urn:uuid:6b86f2ae-296f-568f-8fb8-4c6eddfd69dc",
+    "filename": "0000_X4_20261121_bio_sony.epub"
   }
 ]
