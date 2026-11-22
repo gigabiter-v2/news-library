@@ -230,5 +230,21 @@
     "title": "ソニーの歩みと創業者たちの軌跡",
     "uid": "urn:uuid:6b86f2ae-296f-568f-8fb8-4c6eddfd69dc",
     "filename": "0000_X4_20261121_bio_sony.epub"
+  },
+  {
+    "date": "2026-11-22",
+    "timestamp": "2026-11-22T10:59:05.964740+09:00",
+    "topic_id": "disc_fleming",
+    "title": "フレミングとペニシリンの発見",
+    "uid": "urn:uuid:b27791c3-141f-59fc-8e50-4249a0146d74",
+    "filename": "0000_X4_20261122_disc_fleming.epub"
+  },
+  {
+    "date": "2026-11-22",
+    "timestamp": "2026-11-22T10:59:06.073129+09:00",
+    "topic_id": "biz_kpi_kgi",
+    "title": "目標を現場の行動に落とし込む管理指標の構造と運用",
+    "uid": "urn:uuid:4f6c89d1-aed2-5511-b7a7-29eed1c367c9",
+    "filename": "0000_X4_20261122_biz_kpi_kgi.epub"
   }
 ]

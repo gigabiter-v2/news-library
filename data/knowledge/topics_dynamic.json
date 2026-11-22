@@ -94,5 +94,29 @@
     "category": "cases",
     "title": "滅菌バリデーションの「国際標準」と「日本規格」：ISOとJISの乖離が受託企業の設備投資と海外展開に与えるリスク",
     "kind": "explanation"
+  },
+  {
+    "id": "extra_biography_28ae35e004f8",
+    "category": "biography",
+    "title": "エルンスト・フォン・ベルグマン：蒸気滅菌器の導入と「無菌手術法」への大転換",
+    "kind": "story"
+  },
+  {
+    "id": "extra_biography_622065f48055",
+    "category": "biography",
+    "title": "フランク＆リリアン・ギルブレス夫妻：動作研究の祖が変えた「手術室の器械受け渡し」と作業標準化",
+    "kind": "story"
+  },
+  {
+    "id": "extra_biography_6e599b6b9869",
+    "category": "biography",
+    "title": "ウィリアム・ハルステッド：愛する看護師の手荒れ防止から生まれた「手術用ゴム手袋」の普及史",
+    "kind": "story"
+  },
+  {
+    "id": "extra_biography_96375aa28d92",
+    "category": "biography",
+    "title": "ウォルター・シューハート：「管理図」の発明と品質のバラツキを科学した統計的プロセス管理の原点",
+    "kind": "story"
   }
 ]
