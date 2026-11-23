@@ -118,5 +118,29 @@
     "category": "biography",
     "title": "ウォルター・シューハート：「管理図」の発明と品質のバラツキを科学した統計的プロセス管理の原点",
     "kind": "story"
+  },
+  {
+    "id": "extra_discovery_4632bf835e28",
+    "category": "discovery",
+    "title": "「水」の経営学：RO水の水質管理が鋼製小物の寿命と受託収支に与える影響",
+    "kind": "explanation"
+  },
+  {
+    "id": "extra_discovery_abf023a887cc",
+    "category": "discovery",
+    "title": "滅菌包装のパラダイムシフト：布から不織布、コンテナへの移行がもたらした院内物流の変革",
+    "kind": "story"
+  },
+  {
+    "id": "extra_discovery_eb0df160caa1",
+    "category": "discovery",
+    "title": "CSSDにおける「影の労働」：手術室での一次洗浄（ポイントオブケア）の徹底が受託側の労務コストをどう変えるか",
+    "kind": "explanation"
+  },
+  {
+    "id": "extra_discovery_839cf832104b",
+    "category": "discovery",
+    "title": "インジケータ市場の寡占構造：特定メーカーへの依存リスクと、病院購買部門が直面する価格交渉の壁",
+    "kind": "explanation"
   }
 ]
