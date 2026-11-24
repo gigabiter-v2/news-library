@@ -262,5 +262,21 @@
     "title": "エルンスト・フォン・ベルグマン：蒸気滅菌器の導入と「無菌手術法」への大転換",
     "uid": "urn:uuid:a0726c3a-6c90-5bb6-b338-9f076f112508",
     "filename": "0000_X4_20261123_extra_biography_28ae35e004f8.epub"
+  },
+  {
+    "date": "2026-11-24",
+    "timestamp": "2026-11-24T14:30:46.054574+09:00",
+    "topic_id": "disc_ino",
+    "title": "伊能忠敬による日本全土の測量と実測地図の完成",
+    "uid": "urn:uuid:728ef13e-98aa-5a14-b7bd-b4045d1e78cd",
+    "filename": "0000_X4_20261124_disc_ino.epub"
+  },
+  {
+    "date": "2026-11-24",
+    "timestamp": "2026-11-24T14:30:46.223420+09:00",
+    "topic_id": "mgmt_pdca",
+    "title": "PDCAサイクルの源流：品質管理の歴史をたどる",
+    "uid": "urn:uuid:3755306d-0945-58f2-8dba-40876d4bfc37",
+    "filename": "0000_X4_20261124_mgmt_pdca.epub"
   }
 ]
