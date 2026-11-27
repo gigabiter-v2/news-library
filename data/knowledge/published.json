@@ -302,5 +302,21 @@
     "title": "業務委託契約の基本構造とアウトソーシングにおけるリスク管理",
     "uid": "urn:uuid:201de59c-12c3-5a6a-945e-2bde52788caa",
     "filename": "0000_X4_20261126_extra_cases_376a7b505011.epub"
+  },
+  {
+    "date": "2026-11-27",
+    "timestamp": "2026-11-27T13:07:31.412051+09:00",
+    "topic_id": "extra_hospital_b0070959b9ee",
+    "title": "手術支援ロボットと医療機器の開発および滅菌方法に関する現状",
+    "uid": "urn:uuid:d040070b-c31c-559c-9755-a0a083af0385",
+    "filename": "0000_X4_20261127_extra_hospital_b0070959b9ee.epub"
+  },
+  {
+    "date": "2026-11-27",
+    "timestamp": "2026-11-27T13:07:31.658278+09:00",
+    "topic_id": "mgmt_qc_circle",
+    "title": "QCサークル活動の軌跡：日本における現場改善の展開と変遷",
+    "uid": "urn:uuid:981975e9-2252-5286-8612-6ade34ce69ac",
+    "filename": "0000_X4_20261127_mgmt_qc_circle.epub"
   }
 ]
