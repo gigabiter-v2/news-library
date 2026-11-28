@@ -318,5 +318,21 @@
     "title": "QCサークル活動の軌跡：日本における現場改善の展開と変遷",
     "uid": "urn:uuid:981975e9-2252-5286-8612-6ade34ce69ac",
     "filename": "0000_X4_20261127_mgmt_qc_circle.epub"
+  },
+  {
+    "date": "2026-11-28",
+    "timestamp": "2026-11-28T12:52:15.804410+09:00",
+    "topic_id": "extra_discovery_abf023a887cc",
+    "title": "滅菌技術と不織布素材の発展史",
+    "uid": "urn:uuid:64eb619b-59e5-5d44-a426-e1460de3f176",
+    "filename": "0000_X4_20261128_extra_discovery_abf023a887cc.epub"
+  },
+  {
+    "date": "2026-11-28",
+    "timestamp": "2026-11-28T12:52:15.960542+09:00",
+    "topic_id": "extra_hospital_bfcf046cf120",
+    "title": "院内クラスター発生時の中材BCPと契約免責：感染爆発が露呈させた受託現場の労務管理と費用負担",
+    "uid": "urn:uuid:3aada5fc-3c51-5d9a-803e-2bdcccd16de7",
+    "filename": "0000_X4_20261128_extra_hospital_bfcf046cf120.epub"
   }
 ]
